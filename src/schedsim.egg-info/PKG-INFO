@@ -1,0 +1,77 @@
+Metadata-Version: 2.4
+Name: schedsim
+Version: 0.1.0
+Summary: AI-Driven CPU Scheduling Simulator with ML and RL
+Author: OS Lab Team
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: pandas>=2.2.0
+Requires-Dist: scikit-learn>=1.4.0
+Requires-Dist: matplotlib>=3.8.0
+Requires-Dist: joblib>=1.3.0
+Requires-Dist: pydantic>=2.6.0
+Requires-Dist: fastapi>=0.110.0
+Requires-Dist: uvicorn>=0.28.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=5.0.0; extra == "dev"
+Requires-Dist: ruff>=0.3.0; extra == "dev"
+
+# AI-Driven CPU Scheduling Simulator with ML & RL
+
+A reproducible, fully-tested CPU scheduling simulator developed for Operating Systems (AI3002). Features classical scheduling algorithms (FCFS, SJF, Round Robin, SRTF), a supervised Decision Tree policy recommender, and a tabular Reinforcement Learning (Q-learning) scheduler, accompanied by a FastAPI backend and React dashboard.
+
+## Features
+
+- **Unified Unit-Step Simulation Engine:** Discrete tick-level simulation supporting idle jumps, accurate context switch costs, and unified metric collection across all policies.
+- **Classical Policies:** First-Come First-Served (FCFS), Shortest Job First (SJF), Shortest Remaining Time First (SRTF), and Round Robin (RR).
+- **ML Policy Recommender:** Decision Tree model analyzing workload distribution features (load ratio, burst coefficient of variation, arrival patterns) to select the optimal scheduling algorithm under composite objectives.
+- **RL Dynamic Scheduler:** Tabular Q-learning agent with a compact, permutation-invariant aggregate state space and rule-based action dispatch.
+- **Scientific Evaluation:** Rigid seed separation (train, validation, test), empirical learning curves, regret analysis, and Jain's fairness index.
+- **Web Dashboard:** Interactive FastAPI backend and modern React dashboard with Gantt chart visualization and real-time comparison.
+
+## Project Structure
+
+```
+scheduling_simulator_rl/
+├── config.py                 # Central configuration and hyperparameters
+├── cli.py                    # Command-line interface
+├── pyproject.toml            # Project dependencies and build configuration
+├── src/schedsim/             # Core package
+│   ├── domain/               # Process, Engine, Metrics, Timeline
+│   ├── policies/             # FCFS, SJF, SRTF, RR, Registry
+│   ├── workloads/            # Scenarios, Generator, Presets, IO
+│   ├── ml/                   # Features, Labeling, Dataset, Decision Tree
+│   ├── rl/                   # States, Actions, Gym-like Env, Q-Learning Agent
+│   ├── evaluation/           # Experiment runner, Stats, Plots
+│   └── api/                  # FastAPI routes and schemas
+├── tests/                    # Comprehensive unit and integration test suite
+├── data/                     # Workload files and datasets (generated)
+├── models/                   # Saved ML & RL models
+├── results/                  # Evaluation metrics, figures, and plots
+├── docs/                     # Implementation progress, decisions, report notes
+└── memory-bank/              # Multi-agent persistent memory bank
+```
+
+## Setup & Quickstart
+
+1. **Activate Virtual Environment:**
+   ```powershell
+   .\.venv\Scripts\Activate.ps1
+   ```
+
+2. **Install Dependencies:**
+   ```powershell
+   pip install -e ".[dev]"
+   ```
+
+3. **Run Tests:**
+   ```powershell
+   pytest -q
+   ```
+
+4. **CLI Help:**
+   ```powershell
+   python cli.py --help
+   ```

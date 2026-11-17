@@ -1,0 +1,32 @@
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# Data and models (per Stage 0 specifications)
+data/*.csv
+!data/.gitkeep
+models/*
+!models/.gitkeep
+results/*
+!results/.gitkeep
+
+# IDEs & OS artifacts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Frontend (for later stages)
+frontend/node_modules/
+frontend/dist/
