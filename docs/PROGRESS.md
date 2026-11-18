@@ -6,7 +6,7 @@ Project: AI-Driven CPU Scheduling Simulator
 ## Stage Tracking
 
 - [x] **Stage 0 — Project scaffold**: Directory structure, `pyproject.toml`, `config.py`, CLI skeleton, virtual environment, git initialized.
-- [ ] **Stage 1 — Domain core**: Process, unit-step engine, metrics, timeline.
+- [x] **Stage 1 — Domain core**: Process, unit-step engine, metrics, timeline.
 - [ ] **Stage 2 — Classical policies**: FCFS, SJF, SRTF, RR(q), policy registry, preset workloads.
 - [ ] **Stage 3 — Workload generator and data layer**: Scenarios, generator with seeded RNG, dataset splits.
 - [ ] **Stage 4 — Decision Tree**: Supervised features, composite labeling, pilot study, training and evaluation.
@@ -28,3 +28,12 @@ Project: AI-Driven CPU Scheduling Simulator
 - Established `config.py` with single-source-of-truth constants and seed partitions.
 - Created `cli.py` with subcommand argument parser (`simulate`, `compare`, `build-dataset`, `train-tree`, `train-rl`, `evaluate`).
 - Memory bank initialized to preserve multi-session architectural context.
+
+### Stage 1 — Domain Core (2026-11-18)
+- Implemented `Process` dataclass with defensive validation in `src/schedsim/domain/process.py`.
+- Implemented `TimelineSegment` and `Timeline` with interval merging and partition verification in `src/schedsim/domain/timeline.py`.
+- Implemented `ProcessMetrics`, `SimulationMetrics`, and calculation utilities in `src/schedsim/domain/metrics.py`.
+- Implemented unit-step `Engine`, `ProcView`, `View`, `StepInfo`, `SimResult`, `ScriptedPolicy`, and `run()` in `src/schedsim/domain/engine.py`.
+- Implemented comprehensive domain acceptance suite in `tests/test_domain.py`.
+- Verification: 92/92 tests passing in pytest (100% statement coverage across `schedsim`), 0 ruff errors, all lines <= 100 characters.
+

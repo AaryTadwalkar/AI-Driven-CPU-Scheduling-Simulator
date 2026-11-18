@@ -4,8 +4,8 @@
    used across the CPU scheduling simulator, ML models, RL agent, and evaluation suite.
 2. Overall design:
    Centralizes all mutable simulator tunables, policy defaults, dataset split boundaries, and
-   file system directories into immutable/standardized constants to ensure single-source-of-truth
-   behavior across all stages of development.
+   file system directories into standardized constants to ensure single-source-of-truth behavior
+   across all stages of development.
 3. Elements in the file:
    - Core scheduling constants: TIME_QUANTUM, CONTEXT_SWITCH_COST, MAX_PROCESSES.
    - Machine Learning labeling parameters: LABEL_CS_COST, LABEL_WEIGHTS, LABEL_TIE_TOLERANCE.
