@@ -51,6 +51,12 @@ RL_EPISODES: int = 20000
 RL_EVAL_EVERY: int = 500
 RL_TRAIN_SEEDS: List[int] = [0, 1, 2, 3, 4]
 
+# Reinforcement Learning State Space Discretization Buckets (Section 5 Stage 5)
+STATE_READY_COUNT_EDGES: Tuple[int, ...] = (1, 2, 3)
+STATE_SHORTEST_REMAINING_EDGES: Tuple[int, ...] = (1, 2, 4, 8)
+STATE_LONGEST_REMAINING_EDGES: Tuple[int, ...] = (2, 4, 8, 16)
+STATE_MAX_WAITED_EDGES: Tuple[int, ...] = (0, 2, 5)
+
 # Seed ranges for reproducible splits (Section 3.4)
 TRAIN_SEED_RANGE: Tuple[int, int] = (0, 99999)
 VAL_SEED_RANGE: Tuple[int, int] = (100000, 100499)

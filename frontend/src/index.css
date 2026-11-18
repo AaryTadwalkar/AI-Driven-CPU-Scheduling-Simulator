@@ -1,0 +1,82 @@
+/**
+ * @file src/index.css
+ * 1. What this file does:
+ *    Defines global Tailwind directives, semantic CSS variable tokens for light/dark themes,
+ *    base typography rules (tabular numbers for metrics), and SVG/CSS hatch pattern utilities.
+ * 2. Overall design:
+ *    Uses CSS custom properties on :root and .dark for zero-runtime theme toggling.
+ *    Provides custom classes for engineering metrics and scheduling segment visualization.
+ * 3. Elements in the file:
+ *    - @tailwind base, components, utilities
+ *    - :root and .dark color token maps
+ *    - tabular-nums font configuration for metrics
+ *    - .hatch-idle and .hatch-cs patterns for Gantt segments
+ * 4. Final output of the file:
+ *    The primary stylesheet imported by main.tsx for global application styling.
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: #F8FAFC;
+    --surface: #FFFFFF;
+    --surface-muted: #F1F5F9;
+    --border: #E2E8F0;
+    --text: #0F172A;
+    --text-muted: #64748B;
+    --primary: #4F46E5;
+    --primary-hover: #4338CA;
+    --success: #16A34A;
+    --warning: #D97706;
+    --danger: #DC2626;
+  }
+
+  .dark {
+    --background: #0B1020;
+    --surface: #121A2F;
+    --surface-muted: #182240;
+    --border: #25314F;
+    --text: #E6EAF5;
+    --text-muted: #93A0BF;
+    --primary: #818CF8;
+    --primary-hover: #6366F1;
+    --success: #4ADE80;
+    --warning: #FBBF24;
+    --danger: #F87171;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--text);
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  .font-mono-numbers {
+    font-family: 'JetBrains Mono', monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Diagonal hatch patterns for IDLE and CS (Context Switch) */
+.hatch-idle {
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(148, 163, 184, 0.2),
+    rgba(148, 163, 184, 0.2) 6px,
+    rgba(203, 213, 225, 0.4) 6px,
+    rgba(203, 213, 225, 0.4) 12px
+  );
+}
+
+.hatch-cs {
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(217, 119, 6, 0.3),
+    rgba(217, 119, 6, 0.3) 6px,
+    rgba(245, 158, 11, 0.5) 6px,
+    rgba(245, 158, 11, 0.5) 12px
+  );
+}

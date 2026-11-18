@@ -415,6 +415,8 @@ class Engine:
        - time: Property returning the current simulation time.
        - timeline: Property returning the Timeline recorder instance.
        - context_switches: Property returning total context switches dispatched.
+       - current_view: Property returning current observable View snapshot.
+       - has_pending_arrivals: Property indicating whether any unadmitted processes remain.
        - result: Packages process metrics, aggregate simulation metrics, and execution timeline.
     3. Technologies used and why:
        - Discrete-event unit-step simulation modeling interval [t, t+1).
@@ -723,6 +725,40 @@ class Engine:
         """
         return self._context_switches
 
+    @property
+    def current_view(self) -> View | None:
+        """
+        1. The use of function:
+           Returns the most recent observable View snapshot of the simulation.
+        2. How does the specific function work:
+           Returns internal _current_view reference representing ready tasks and state.
+        3. Concepts used in the function:
+           Read-only state exposure, property decorator, encapsulation.
+        4. Places where this function is imported and used:
+           Used by RL environments, test verifiers, and decision policies.
+        5. Final output of the function, before and after:
+           Before: Property accessed on Engine instance.
+           After: Returns View instance or None if not initialized.
+        """
+        return self._current_view
+
+    @property
+    def has_pending_arrivals(self) -> bool:
+        """
+        1. The use of function:
+           Indicates whether any workload processes remain unadmitted in the future.
+        2. How does the specific function work:
+           Compares count of admitted processes against total count of workload processes.
+        3. Concepts used in the function:
+           Arrival tracking, admission completion check, property decorator.
+        4. Places where this function is imported and used:
+           Used by RL state encoders and environment wrappers to flag pending arrivals.
+        5. Final output of the function, before and after:
+           Before: Property accessed on Engine instance.
+           After: Returns True if unadmitted processes remain, False otherwise.
+        """
+        return len(self._admitted) < len(self._processes)
+
     def result(self) -> SimResult:
         """
         1. The use of function:
@@ -788,6 +824,11 @@ def run(
     """
     engine = Engine(processes=processes, cs_cost=cs_cost)
     view = engine.reset()
+
+    if hasattr(policy, "bind_workload") and callable(policy.bind_workload):
+        policy.bind_workload(processes)
+    elif hasattr(policy, "reset") and callable(policy.reset):
+        policy.reset()
 
     while not engine.done:
         if hasattr(policy, "select") and callable(policy.select):

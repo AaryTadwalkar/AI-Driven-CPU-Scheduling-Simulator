@@ -24,3 +24,26 @@ This document records key technical decisions, rationale, deviations from the ba
 - **Decision:** Label workloads using a weighted composite score (50% waiting time, 30% response time, 20% turnaround time) with context switch cost included.
 - **Rationale:** Reflects realistic multi-objective OS scheduling and produces balanced, non-trivial classification targets.
 - **Alternatives Rejected:** Single-metric waiting time labeling.
+
+## Decision 004: Section 4c Pilot Gate Setting Selection
+- **Status:** Accepted
+- **Context:** Stage 4c mandates evaluating 600 pilot workloads across candidate labeling configurations before building the full training dataset.
+- **Empirical Results (600 Workloads):**
+  - `cs0_q2_standard` (`cs_cost=0, q=2, weights=(0.5, 0.3, 0.2)`):
+    * FCFS: 59 (9.8%), SJF: 182 (30.3%), RR: 359 (59.8%). Ambiguous: 12.3%.
+  - `cs1_q2_standard` (`cs_cost=1, q=2, weights=(0.5, 0.3, 0.2)`):
+    * FCFS: 123 (20.5%), SJF: 305 (50.8%), RR: 172 (28.7%). Ambiguous: 21.3%.
+  - `cs1_q4_standard` (`cs_cost=1, q=4, weights=(0.5, 0.3, 0.2)`):
+    * FCFS: 122 (20.3%), SJF: 333 (55.5%), RR: 145 (24.2%). Ambiguous: 23.5%.
+  - `cs1_q2_balanced_weights` (`cs_cost=1, q=2, weights=(0.333, 0.333, 0.334)`):
+    * FCFS: 123 (20.5%), SJF: 300 (50.0%), RR: 177 (29.5%). Ambiguous: 21.3%.
+- **Decision:** Adopt `cs1_q2_standard` (`cs_cost=1, quantum=2, weights={"wait": 0.5, "resp": 0.3, "tat": 0.2}`) for full dataset construction.
+- **Rationale:**
+  1. Setting `cs_cost=1` realistically models CPU preemption context switch overheads, preventing artificial Round Robin inflation.
+  2. The resulting class distribution is well balanced across all three candidate policies: FCFS (20.5%), SJF (50.8%), and RR (28.7%).
+  3. No class approaches the 85% dominance threshold, creating an informative, multi-class learning problem.
+  4. Preserves the canonical assignment baseline parameters defined in `config.py`.
+- **Alternatives Rejected:**
+  - `cs0_q2_standard`: Rejected because 0 context switch penalty artificially favors RR preemption.
+  - `cs1_q4_standard`: Larger quantum (q=4) slightly degrades RR responsiveness without changing the balance advantage.
+

@@ -1,27 +1,25 @@
 # Active Context
 
 ## Current Work Focus
-- Stage 1 execution: Domain core acceptance test suite completed.
-- All Stage 1 tasks (Task 1: `Process`, Task 2: `Timeline`, Task 3: `Metrics`, Task 4: `Engine`, Task 5: Domain Core Acceptance Test Suite) complete with 100% test coverage.
-- Next up: Stage 2 (Classical Policies: FCFS, SJF, SRTF, RR, registry, and CLI simulation).
+- Stage 9 Complete: All Sub-stages (F1 through F6) implemented, verified, and automated.
+- Frontend Dashboard (Vite + React 18 + TS + Tailwind + Zustand + TanStack Query + Recharts) fully operational against live FastAPI backend.
+- Playwright E2E test suite (20 tests) and Vitest unit/integration test suite (96 tests) 100% passing.
+- Automated screenshot capture of all 14 checklist figures in `screenshots/` verified.
 
 ## Recent Changes
-- Implemented `tests/test_domain.py` verifying all Stage 1 acceptance criteria and domain invariants:
-  1. Idle gap at start: Initial idle jump [0, 5) and completion at tick 7.
-  2. Simultaneous arrivals: Ordered admission at tick 2, canonical sorting, and waited tracking.
-  3. Context switch overhead with `cs_cost = 2`: Hand-calculated fixture verification (makespan=6, CS=1, overhead=2, busy=4, P1 wait=0, P2 wait=3).
-  4. Penalty invariant: Step penalty sums exactly equal process waiting times (`sum(penalties) == sum(waiting)`).
-  5. Timeline partition invariant: Gapless, non-overlapping partition of `[0, makespan)`.
-  6. Conservation invariant: Total busy ticks strictly equals sum of process bursts across all configurations.
-  7. Engine independence: Engine neutrality verified under adversarial/custom policies with zero heuristic bias.
-  8. Hand-verified Section 4.6 reference fixtures: FCFS, SJF, and SRTF numerical agreement.
-  9. Domain metric algebraic invariants and end-to-end `run()` helper verification.
-- All 92 tests passing with 100% test coverage (`src/schedsim`); `ruff check .` clean.
+- Completed Stage 9 Sub-stage F6 (Polish, Verification, Screenshots & Documentation):
+  - **Responsive Design & Accessibility Audit**: Verified layout across 1440px desktop, 1024px small desktop, 768px tablet, and 390px mobile viewports across all 4 pages (`/`, `/compare`, `/ai-lab`, `/results`). Verified keyboard shortcuts (`Space` for play/pause, `ArrowLeft`/`ArrowRight` for step forward/back) and theme toggle.
+  - **Playwright Setup & E2E Tests**: Installed `@playwright/test` and Chromium; authored `frontend/playwright.config.ts`, `frontend/e2e/smoke.spec.ts` (preset loading, simulation, Gantt, metrics, route traversal), and `frontend/e2e/responsive-a11y.spec.ts` (20 E2E tests passing in 16s).
+  - **Screenshot Capture Automation**: Created `frontend/scripts/capture_screenshots.ts` (`npm run screenshots`); automatically captured all 14 mandatory report checklist screenshots at 1440×900 into `screenshots/` with verified non-empty PNG files (119 KB to 182 KB).
+  - **Backend Route Polish**: Added `"Q_LEARNING"` and `"Q-LEARNING"` alias handling in `src/schedsim/api/service.py` to seamlessly accept all policy casing formats from the frontend workbench.
+  - **Frontend Documentation**: Created comprehensive `frontend/README.md` detailing architecture, setup instructions, backend synchronization, component breakdown, screenshot mapping, and Definition of Done verification.
+  - **Build & Test Verification**: Confirmed `npm test` runs 96 Vitest unit tests cleanly (2.35s), `npm run test:e2e` passes 20 Playwright tests (16.2s), and `npm run build` succeeds with strict TypeScript typechecking and minification (6.42s).
 
 ## Next Steps
-- Transition to Stage 2: Classical Policies (`FCFS`, `SJF`, `SRTF`, `RR(q)`), policy registry, and CLI simulator.
+- Stage 10: Final Documentation & Report Generation (Assignment PDF / LaTeX report integrating the 14 captured screenshots, benchmark findings, and system evaluation).
 
 ## Active Decisions & Considerations
 - Strict user workspace rule followed: **never commit or push in git**.
-- Multi-point docstrings on all files, classes, and functions maintained.
-- All domain invariants confirmed mechanically.
+- Full compliance with file, class, and function docstring standards.
+- Vitest configuration updated in `vite.config.ts` to strictly include `src/test/**` and exclude `e2e/**` to keep unit and Playwright tests cleanly separated.
+- All 14 report screenshots are saved at 1440×900 resolution in the repository root `screenshots/` directory.
