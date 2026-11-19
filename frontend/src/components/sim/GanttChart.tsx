@@ -179,8 +179,9 @@ export const GanttChart: React.FC<GanttChartProps> = ({
                 const upper = seg.label.toUpperCase();
                 const isIdle = upper === 'IDLE';
                 const isCS = upper === 'CS' || upper === 'CONTEXT_SWITCH';
+                const isAI = upper === 'AI' || upper === 'AI_OVERHEAD';
                 const widthPct = ((seg.end - seg.start) / totalTicks) * 100;
-                const bgColor = isIdle || isCS ? undefined : getProcessColor(seg.label);
+                const bgColor = isIdle || isCS || isAI ? undefined : getProcessColor(seg.label);
 
                 return (
                   <div
@@ -193,7 +194,9 @@ export const GanttChart: React.FC<GanttChartProps> = ({
                     }}
                     className={`relative h-full flex flex-col items-center justify-center border-r border-black/15 transition-all text-xs font-mono font-bold text-white group ${
                       isIdle ? 'hatch-idle text-foreground-muted' : ''
-                    } ${isCS ? 'hatch-cs text-amber-900' : ''}`}
+                    } ${isCS ? 'hatch-cs text-amber-900' : ''} ${
+                      isAI ? 'hatch-ai text-pink-900' : ''
+                    }`}
                     title={`${seg.label}: [${seg.start}, ${seg.end}) (${seg.duration} ticks)`}
                   >
                     <span className="truncate px-1 drop-shadow-sm pointer-events-none text-xs">

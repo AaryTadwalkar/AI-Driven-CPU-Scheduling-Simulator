@@ -64,9 +64,17 @@ class SimulateRequest(BaseModel):
     processes: list[ProcessSchema] = Field(
         ..., min_length=1, max_length=50, description="Workload processes (1 to 50)"
     )
-    algorithm: str = Field(..., description="Target policy (FCFS, SJF, SRTF, RR, QLEARNING, RL)")
+    algorithm: str = Field(
+        ...,
+        description=(
+            "Target policy (FCFS, SJF, SRTF, RR, QLEARNING, RL, DT, RF, PID_GBDT, PID_NN)"
+        ),
+    )
     quantum: int = Field(2, ge=1, le=50, description="Time quantum for Round Robin")
     cs_cost: int = Field(0, ge=0, le=10, description="Context switch cost in ticks")
+    tick_us: float | None = Field(
+        None, ge=0.001, le=100000.0, description="Optional microseconds per tick"
+    )
 
     @model_validator(mode="after")
     def validate_unique_pids(self) -> "SimulateRequest":
@@ -137,6 +145,11 @@ class SimulationMetricsSchema(BaseModel):
     throughput: float
     context_switches: int
     jain_fairness: float
+    ai_overhead_ticks: int = 0
+    decisions: int = 0
+    inference_us_total: float = 0.0
+    effective_makespan: int = 0
+    effective_turnaround: float = 0.0
 
 
 class TimelineSegmentSchema(BaseModel):
@@ -249,6 +262,9 @@ class CompareRequest(BaseModel):
     )
     quantum: int = Field(2, ge=1, le=50)
     cs_cost: int = Field(0, ge=0, le=10)
+    tick_us: float | None = Field(
+        None, ge=0.001, le=100000.0, description="Optional microseconds per tick"
+    )
 
     @model_validator(mode="after")
     def validate_unique_pids(self) -> "CompareRequest":
@@ -421,11 +437,65 @@ class ErrorResponse(BaseModel):
     detail: str
 
 
+class FinalComparisonRowSchema(BaseModel):
+    """
+    1. The use of class:
+       Schema representing an individual policy row in final benchmark comparison matrix.
+    2. What the class contains:
+       policy name, raw waiting, turnaround, response, effective turnaround and makespan,
+       fairness, context switches, decisions, inference latency, overhead %, gains, and W/T/L.
+    3. Technologies used and why:
+       Pydantic v2 frozen model for immutable serialization.
+    4. Key design and overall design of the class:
+       Exposes held-out test split evaluation metrics with 95% bootstrap confidence intervals.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    policy: str
+    avg_waiting: str | float | None = None
+    avg_turnaround: str | float | None = None
+    avg_response: str | float | None = None
+    effective_avg_turnaround: str | float | None = None
+    effective_makespan: str | float | None = None
+    max_waiting: str | float | None = None
+    jain_fairness: str | float | None = None
+    context_switches: str | float | None = None
+    decisions: str | float | None = None
+    inference_us_total: str | float | None = None
+    overhead_pct_makespan: str | float | None = None
+    gain_over_best_classical: str | float | None = None
+    gap_to_oracle: str | float | None = None
+    win_tie_loss: str | None = None
+
+
+class FinalComparisonResponse(BaseModel):
+    """
+    1. The use of class:
+       Response envelope for /api/results/final endpoint containing Setting S0 and S1 tables.
+    2. What the class contains:
+       S0 list of FinalComparisonRowSchema, S1 list of FinalComparisonRowSchema, and aliases.
+    3. Technologies used and why:
+       Pydantic v2 model for structured multi-setting benchmark reporting.
+    4. Key design and overall design of the class:
+       Returns full final comparison tables for the dashboard and external evaluators.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    S0: list[FinalComparisonRowSchema] = Field(default_factory=list)
+    S1: list[FinalComparisonRowSchema] = Field(default_factory=list)
+    s0: list[FinalComparisonRowSchema] | None = None
+    s1: list[FinalComparisonRowSchema] | None = None
+
+
 __all__ = [
     "CompareRequest",
     "CompareResponse",
     "DecisionTraceEntry",
     "ErrorResponse",
+    "FinalComparisonResponse",
+    "FinalComparisonRowSchema",
     "GenerateWorkloadRequest",
     "GenerateWorkloadResponse",
     "HealthResponse",

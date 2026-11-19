@@ -41,6 +41,10 @@ const ALGORITHM_OPTIONS = [
   { id: 'SRTF', label: 'SRTF (Preemptive SJF)' },
   { id: 'RR', label: 'Round Robin (RR)' },
   { id: 'QLEARNING', label: 'Q-Learning RL Agent' },
+  { id: 'DT', label: 'Decision Tree (Category 1)' },
+  { id: 'RF', label: 'Random Forest (Category 1)' },
+  { id: 'PID_GBDT', label: 'GBDT Ranker (Category 3)' },
+  { id: 'PID_NN', label: 'Neural Scorer (Category 3)' },
 ] as const;
 
 /**

@@ -1,10 +1,17 @@
 """
 1. What this file does:
-   Initializes the API routes subpackage.
+   Initializes the API routes subpackage and exports modular APIRouter instances.
 2. Overall design:
-   Contains modular API router definitions for simulation, ML recommendations, and RL agents.
+   Re-exports simulation_router and results_router for clean assembly within the FastAPI
+   application factory.
 3. Elements in the file:
-   Package initialization marker.
+   - results_router: Router for benchmark and comparison results.
+   - simulation_router: Router for single-policy simulation and multi-policy comparison.
 4. Final output of the file:
-   Enables module importing from schedsim.api.routes.
+   Exposes results_router and simulation_router to callers.
 """
+
+from schedsim.api.routes.results import router as results_router
+from schedsim.api.routes.simulation import router as simulation_router
+
+__all__ = ["results_router", "simulation_router"]

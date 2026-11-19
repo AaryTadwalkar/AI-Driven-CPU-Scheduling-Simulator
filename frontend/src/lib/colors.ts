@@ -34,6 +34,7 @@ export const PROCESS_PALETTE: readonly string[] = [
 export const SPECIAL_SEGMENT_COLORS = {
   IDLE: '#94A3B8', // Slate-400
   CS: '#D97706',   // Amber-600
+  AI: '#EC4899',   // Pink-500 AI stall overhead
 } as const;
 
 export const ALGORITHM_COLORS: Record<string, string> = {
@@ -45,6 +46,10 @@ export const ALGORITHM_COLORS: Record<string, string> = {
   AI: '#EC4899',          // Alias for Q-Learning
   RL: '#EC4899',          // Alias for RL agent
   QLEARNING: '#EC4899',   // Alias for Q-Learning
+  DT: '#06B6D4',          // Cyan
+  RF: '#14B8A6',          // Teal
+  PID_GBDT: '#E11D48',    // Rose
+  PID_NN: '#8B5CF6',      // Violet
 };
 
 /**

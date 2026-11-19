@@ -16,7 +16,7 @@
   * Neural Candidate Scorer raw waiting: `12.80` ticks (gap vs SRTF: `+0.00%`).
   * GBDT Ranker raw average waiting: `12.80` ticks (gap vs SRTF: `+0.00%`).
   * At $\text{tick}_{\mu\text{s}} = 1000\,\mu\text{s}$, effective turnaround for SRTF is `22.94` ticks,
-    compared to `28.04` ticks for Neural and `116.58` ticks for GBDT.
+    compared to `27.21` ticks for Neural and `113.16` ticks for GBDT.
 - **Supporting Figures:** `results/figures/effective_cost_vs_tick.png` (Panel S0) and `results/figures/gap_to_oracle_bars.png`.
 
 ---
@@ -41,7 +41,7 @@
 - **Empirical Evidence:**
 - **Q-learning** at S1 does not break even within $[1, 10000]\,\mu\text{s}$ (cost remains higher than SJF).
 - **PID_GBDT** at S1 does not break even within $[1, 10000]\,\mu\text{s}$ (cost remains higher than SJF).
-- **PID_NN** at S1 breaks even at $\text{tick}^* = 7807.4\,\mu\text{s}$ against SJF.
+- **PID_NN** at S1 breaks even at $\text{tick}^* = 7208.6\,\mu\text{s}$ against SJF.
 - **Supporting Figures:** `results/figures/effective_cost_vs_tick.png` (marked with red intersection points).
 
 ---
@@ -51,7 +51,7 @@
 - **Pre-Registered Claim:** Category 1 models (DT, RF) have negligible overhead (< 0.1% makespan),
   remain invariant across tick durations, and closely track Best-Classical-Hindsight without beating it.
 - **Empirical Evidence:**
-  * Decision Tree overhead percentage of makespan: `1.54%` (< 0.1%).
-  * Random Forest overhead percentage of makespan: `57.42%` (< 0.1%).
+  * Decision Tree overhead percentage of makespan: `0.00%` (< 0.1%).
+  * Random Forest overhead percentage of makespan: `62.08%` (< 0.1%).
   * Best-Classical-Hindsight raw waiting: `16.88` ticks vs Random Forest: `32.70` ticks (gap: `+93.67%`).
 - **Supporting Figures:** `results/figures/overhead_breakdown.png` and `results/figures/effective_cost_vs_tick.png`.

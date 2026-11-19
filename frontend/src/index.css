@@ -60,7 +60,7 @@
   }
 }
 
-/* Diagonal hatch patterns for IDLE and CS (Context Switch) */
+/* Diagonal hatch patterns for IDLE, CS (Context Switch), and AI (Inference Overhead) */
 .hatch-idle {
   background: repeating-linear-gradient(
     45deg,
@@ -78,5 +78,15 @@
     rgba(217, 119, 6, 0.3) 6px,
     rgba(245, 158, 11, 0.5) 6px,
     rgba(245, 158, 11, 0.5) 12px
+  );
+}
+
+.hatch-ai {
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(236, 72, 153, 0.3),
+    rgba(236, 72, 153, 0.3) 6px,
+    rgba(244, 114, 182, 0.5) 6px,
+    rgba(244, 114, 182, 0.5) 12px
   );
 }

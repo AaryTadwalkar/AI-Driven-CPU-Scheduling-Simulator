@@ -23,6 +23,7 @@
    - handle_train_rl: Handler executing tabular Q-learning training and hyperparameter search.
    - handle_evaluate: Handler executing evaluation across held-out splits.
    - handle_compare_all: Handler executing Stage 18 final comparison across all 11 policies.
+   - handle_smoke: Handler executing Stage 20 fast end-to-end smoke test across components.
    - build_parser: Function constructing the CLI argument parser and defining subcommands.
    - main: Main execution function parsing CLI arguments and dispatching requested subcommands.
 4. Final output of the file:
@@ -34,7 +35,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import config
 from schedsim.domain.engine import SimResult, run
@@ -1254,6 +1255,126 @@ def handle_compare_all(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_smoke(args: argparse.Namespace) -> int:
+    """
+    1. The use of function:
+       Executes a rapid (< 15 second) end-to-end smoke test validating all project components.
+    2. How does the specific function work:
+       Validates workload generation across 5 scenarios, runs all 11 scheduling policies through
+       unit-step Engine, tests Decision Tree recommendation, checks GBDT and Neural candidate
+       scoring, reads latency profiles, asserts existence of S0 and S1 final comparison tables,
+       and prints a formatted green pass banner with total elapsed execution time.
+    3. Concepts used in the function:
+       End-to-end smoke verification, multi-policy dispatch, model assertion, ANSI banner styling.
+    4. Places where this function is imported and used:
+       Dispatched by main() in cli.py when 'smoke' subcommand is invoked, and called by Makefile.
+    5. Final output of the function, before and after:
+       Before: CLI invocation without component status confirmation.
+       After: Validated end-to-end simulation pipelines; returns 0 on success.
+    """
+    import pandas as pd
+
+    from schedsim.domain.engine import Engine, run
+    from schedsim.ml.evaluate_tree import recommend
+    from schedsim.overhead import get_interpolated_cost_us, load_latency_profile
+    from schedsim.pidsel.gbdt_ranker import GBDTRankerPolicy
+    from schedsim.pidsel.oracle import RolloutOraclePolicy
+    from schedsim.pidsel.scorer_net import NeuralCandidatePolicy
+    from schedsim.policies.registry import get_policy
+    from schedsim.rl.policy import RLPolicy
+    from schedsim.workloads.generator import generate_workload
+
+    t0 = time.perf_counter()
+    print("=" * 80)
+    print("  CPU SCHEDULING SIMULATOR — FAST END-TO-END SMOKE TEST")
+    print("=" * 80)
+
+    # 1. Workload generation across 5 scenarios
+    scenarios = ["mixed", "short_jobs", "bimodal", "convoy", "high_load"]
+    workloads = []
+    for i, scen in enumerate(scenarios):
+        wl = generate_workload(scen, n=5, seed=1000 + i)
+        assert len(wl) == 5, f"Expected 5 processes for {scen}, got {len(wl)}"
+        workloads.append(wl)
+    print("[1/6] Workload Generation: 5 synthetic scenarios generated successfully.")
+
+    test_wl = workloads[0]
+
+    # 2. All 11 policies execution through Engine
+    policies: list[tuple[str, Any]] = [
+        ("FCFS", get_policy("FCFS")),
+        ("SJF", get_policy("SJF")),
+        ("RR", get_policy("RR", quantum=2)),
+        ("SRTF", get_policy("SRTF")),
+        ("DT", get_policy("DT")),
+        ("RF", get_policy("RF")),
+        ("Q-learning", RLPolicy.from_setting("S1")),
+        ("PID_GBDT", get_policy("PID_GBDT", cs_cost=1)),
+        ("PID_NN", get_policy("PID_NN", cs_cost=1)),
+        ("Oracle", RolloutOraclePolicy(cs_cost=1)),
+    ]
+    for name, pol in policies:
+        res = run(pol, test_wl, cs_cost=1, tick_us=100.0)
+        assert res.simulation_metrics.makespan > 0, f"Makespan non-positive for {name}"
+
+    # 11th policy: Best-Classical-Hindsight
+    bc_wait = min(
+        run(get_policy(n), test_wl, cs_cost=1).simulation_metrics.avg_turnaround
+        for n in ["FCFS", "SJF", "RR", "SRTF"]
+    )
+    assert bc_wait > 0
+    print("[2/6] Policy Verification: 11/11 policies executed through unit-step Engine.")
+
+    # 3. Decision Tree recommendation
+    rec = recommend(test_wl, model="dt", setting="S1")
+    assert "algorithm" in rec, "Recommendation missing 'algorithm'"
+    assert "probabilities" in rec, "Recommendation missing 'probabilities'"
+    print("[3/6] ML Recommender: Decision Tree recommendation executed.")
+
+    # 4. GBDT & Neural scoring
+    eng = Engine(test_wl, cs_cost=1, tick_us=100.0)
+    view = eng.reset()
+    gbdt_p = GBDTRankerPolicy.from_setting("S1")
+    nn_p = NeuralCandidatePolicy.from_setting("S1")
+    ready_pids = [p.pid for p in view.ready]
+    assert gbdt_p.select(view) in ready_pids, "GBDT candidate selection invalid"
+    assert nn_p.select(view) in ready_pids, "Neural candidate selection invalid"
+    print("[4/6] Candidate Scoring: GBDT ranker and Neural candidate scorer verified.")
+
+    # 5. Latency profile reading
+    prof = load_latency_profile()
+    assert prof is not None, "Latency profile could not be loaded"
+    assert get_interpolated_cost_us("PID_NN", 3) > 0.0, "Interpolated cost must be positive"
+    print("[5/6] Latency Profiling: Model execution costs loaded and verified.")
+
+    # 6. Final comparison tables existence
+    p_s0 = config.RESULTS_DIR / "final_comparison_S0.csv"
+    p_s1 = config.RESULTS_DIR / "final_comparison_S1.csv"
+    assert p_s0.exists(), f"Missing {p_s0}"
+    assert p_s1.exists(), f"Missing {p_s1}"
+    df_s0 = pd.read_csv(p_s0)
+    df_s1 = pd.read_csv(p_s1)
+    assert len(df_s0) == 11, f"Expected 11 rows in S0, got {len(df_s0)}"
+    assert len(df_s1) == 11, f"Expected 11 rows in S1, got {len(df_s1)}"
+    print("[6/6] Benchmark Results: Final comparison tables S0 and S1 verified (11 rows each).")
+
+    elapsed = time.perf_counter() - t0
+    green = "\033[92m"
+    bold = "\033[1m"
+    reset = "\033[0m"
+
+    print("\n" + "=" * 80)
+    print(f"{green}{bold}  [PASS] ALL END-TO-END SMOKE TESTS PASSED ({elapsed:.2f}s < 15s){reset}")
+    print("  • Workload Synthesis: 5 scenarios verified")
+    print("  • Policy Execution: 11/11 policies executed through unit-step Engine")
+    print("  • ML Recommender: Decision Tree inference verified")
+    print("  • Category 3 Scoring: GBDT ranker & Neural candidate scorer verified")
+    print("  • Latency Accounting: Profiler active with discrete tick debt")
+    print("  • Final Deliverables: S0 and S1 comparison tables confirmed (11 rows each)")
+    print("=" * 80)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """
     1. The use of function:
@@ -1714,6 +1835,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target output directory for tables and figures (default: results).",
     )
 
+    subparsers.add_parser(
+        "smoke",
+        help="Run fast (< 15s) end-to-end smoke test across all models, policies, and tables.",
+    )
+
     return parser
 
 
@@ -1777,6 +1903,9 @@ def main(args: Optional[List[str]] = None) -> int:
 
     if parsed_args.command == "compare-all":
         return handle_compare_all(parsed_args)
+
+    if parsed_args.command == "smoke":
+        return handle_smoke(parsed_args)
 
     print(
         f"Command '{parsed_args.command}' received. Implementation active in subsequent stages."

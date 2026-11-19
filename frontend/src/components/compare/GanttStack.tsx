@@ -215,8 +215,9 @@ export const GanttStack: React.FC<GanttStackProps> = ({
                     const upper = seg.label.toUpperCase();
                     const isIdle = upper === 'IDLE';
                     const isCS = upper === 'CS' || upper === 'CONTEXT_SWITCH';
+                    const isAI = upper === 'AI' || upper === 'AI_OVERHEAD';
                     const widthPct = ((seg.end - seg.start) / globalMakespan) * 100;
-                    const bgColor = isIdle || isCS ? undefined : getProcessColor(seg.label);
+                    const bgColor = isIdle || isCS || isAI ? undefined : getProcessColor(seg.label);
 
                     return (
                       <div
@@ -229,7 +230,9 @@ export const GanttStack: React.FC<GanttStackProps> = ({
                         }}
                         className={`relative h-full flex items-center justify-center border-r border-black/15 transition-all text-[11px] font-mono font-bold text-white group cursor-pointer ${
                           isIdle ? 'hatch-idle text-foreground-muted' : ''
-                        } ${isCS ? 'hatch-cs text-amber-900' : ''}`}
+                        } ${isCS ? 'hatch-cs text-amber-900' : ''} ${
+                          isAI ? 'hatch-ai text-pink-900' : ''
+                        }`}
                         title={`${algo} — ${seg.label}: [${seg.start}, ${seg.end}) (${seg.duration} ticks)`}
                       >
                         <span className="truncate px-1 drop-shadow-sm pointer-events-none">

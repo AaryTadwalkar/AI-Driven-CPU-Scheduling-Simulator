@@ -21,6 +21,7 @@
 
 from typing import Any
 
+import config
 from schedsim.policies.base import Policy
 from schedsim.policies.fcfs import FCFSPolicy
 from schedsim.policies.round_robin import RoundRobinPolicy
@@ -111,11 +112,6 @@ def get_policy(name: str, /, **kwargs: Any) -> Policy:
         _, policy_cls = _REGISTRY[key]
         return policy_cls(**kwargs)
 
-    if key in _ALIASES:
-        _, policy_cls, def_kwargs = _ALIASES[key]
-        merged = {**def_kwargs, **kwargs}
-        return policy_cls(**merged)
-
     if key in ("dt", "rf", "selectorpolicy"):
         from schedsim.policies.selector import SelectorPolicy
         if key == "dt":
@@ -124,13 +120,29 @@ def get_policy(name: str, /, **kwargs: Any) -> Policy:
             return SelectorPolicy(model="rf", **kwargs)
         return SelectorPolicy(**kwargs)
 
+    if key in ("qlearning", "rl", "rlpolicy", "q-learning", "q_learning"):
+        from schedsim.rl.policy import RLPolicy
+        if "agent" in kwargs:
+            agent = kwargs.pop("agent")
+            return RLPolicy(agent=agent, **kwargs)
+        cs = kwargs.pop("cs_cost", 1)
+        models_dir = kwargs.pop("models_dir", config.MODELS_DIR)
+        return RLPolicy.from_cs_cost(cs_cost=cs, models_dir=models_dir, **kwargs)
+
     if key in ("pid_gbdt", "gbdt", "gbdtrankerpolicy"):
         from schedsim.pidsel.gbdt_ranker import GBDTRankerPolicy
-        return GBDTRankerPolicy(**kwargs)
+        models_dir = kwargs.pop("models_dir", config.MODELS_DIR)
+        return GBDTRankerPolicy(models_dir=models_dir, **kwargs)
 
     if key in ("pid_nn", "pid_neural", "neuralcandidatepolicy"):
         from schedsim.pidsel.scorer_net import NeuralCandidatePolicy
-        return NeuralCandidatePolicy(**kwargs)
+        models_dir = kwargs.pop("models_dir", config.MODELS_DIR)
+        return NeuralCandidatePolicy(models_dir=models_dir, **kwargs)
+
+    if key in _ALIASES:
+        _, policy_cls, def_kwargs = _ALIASES[key]
+        merged = {**def_kwargs, **kwargs}
+        return policy_cls(**merged)
 
     avail = ", ".join(list_policies(include_aliases=True))
     raise KeyError(f"Unknown policy '{name}'. Available policies: {avail}")

@@ -1,18 +1,19 @@
 """
 1. What this file does:
    Defines the FastAPI application instance, lifespan lifecycle manager, CORS middleware,
-   global exception handlers, and all REST API endpoints under the /api route prefix.
+   global exception handlers, and mounts modular REST API routers for simulation and results.
 2. Overall design:
    Provides a high-performance, stateless HTTP service layer exposing the CPU scheduling
    simulator, preset workloads, on-demand generation, multi-algorithm comparisons, Decision Tree
-   recommendations, and benchmark analytics to the React dashboard. Pre-loads AI models at startup,
-   and surfaces descriptive HTTP 503 responses when optional model artifacts are missing.
+   recommendations, RL training trajectories, and benchmark analytics to the React dashboard.
+   Pre-loads AI models at startup, and surfaces descriptive HTTP 503 responses when optional model
+   artifacts are missing from disk.
 3. Elements in the file:
    - lifespan: Async context manager pre-loading Q-learning agents and checking model files.
-   - create_app: Application factory configuring FastAPI, CORS, routes, and exception handlers.
-   - Endpoints: /api/health, /api/presets, /api/workloads/generate, /api/simulate, /api/compare,
-     /api/recommend, /api/ml/model-info, /api/rl/training-log, /api/rl/policy-summary,
-     /api/results/summary.
+   - create_app: Application factory configuring FastAPI, CORS, routers, and exception handlers.
+   - Endpoints: /api/health, /api/presets, /api/workloads/generate, /api/recommend,
+     /api/ml/model-info, /api/rl/training-log, /api/rl/policy-summary, mounted simulation router,
+     and mounted results router (/api/results/final, /api/results/summary).
 4. Final output of the file:
    Exports app and create_app for ASGI servers (Uvicorn) and integration test clients.
 """
@@ -22,31 +23,26 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import config
+from schedsim.api.routes import results_router, simulation_router
 from schedsim.api.schemas import (
-    CompareRequest,
-    CompareResponse,
     ErrorResponse,
     GenerateWorkloadRequest,
     GenerateWorkloadResponse,
     HealthResponse,
     RecommendRequest,
     RecommendResponse,
-    SimulateRequest,
-    SimulateResponse,
 )
 from schedsim.api.service import (
     ModelMissingException,
     generate_workload_service,
     processes_from_schemas,
-    run_comparison_service,
     run_recommend_service,
-    run_simulation_service,
 )
 from schedsim.rl.agent import QLearningAgent
 from schedsim.workloads.presets import get_preset, list_presets
@@ -91,7 +87,7 @@ def create_app() -> FastAPI:
     2. How does the specific function work:
        Creates FastAPI app, configures CORS middleware for localhost:5173, registers global
        exception handlers for ModelMissingException, ValueError, and RequestValidationError,
-       and attaches all /api endpoints.
+       and attaches all /api endpoints and modular APIRouter instances.
     3. Concepts used in the function:
        Application factory pattern, middleware configuration, declarative routing.
     4. Places where this function is imported and used:
@@ -141,7 +137,13 @@ def create_app() -> FastAPI:
         )
 
     # --------------------------------------------------------------------------
-    # API Routes
+    # Modular APIRouters (Simulation & Final Benchmark Results)
+    # --------------------------------------------------------------------------
+    api.include_router(simulation_router)
+    api.include_router(results_router)
+
+    # --------------------------------------------------------------------------
+    # Core API Endpoints
     # --------------------------------------------------------------------------
 
     @api.get(
@@ -153,13 +155,20 @@ def create_app() -> FastAPI:
         """Returns API status, version, and availability flags for model checkpoints."""
         models_status = {
             "decision_tree": (config.MODELS_DIR / "decision_tree.joblib").exists(),
+            "random_forest": (config.MODELS_DIR / "random_forest.joblib").exists(),
             "q_table_cs0": (config.MODELS_DIR / "q_table_cs0.pkl").exists(),
             "q_table_cs1": (config.MODELS_DIR / "q_table_cs1.pkl").exists(),
             "q_table": (config.MODELS_DIR / "q_table.pkl").exists(),
+            "pid_gbdt_s0": (config.MODELS_DIR / "pid_gbdt_S0.npz").exists(),
+            "pid_gbdt_s1": (config.MODELS_DIR / "pid_gbdt_S1.npz").exists(),
+            "pid_nn_s0": (config.MODELS_DIR / "pid_nn_S0.npz").exists(),
+            "pid_nn_s1": (config.MODELS_DIR / "pid_nn_S1.npz").exists(),
         }
         artifacts_status = {
             "evaluation_results": (config.RESULTS_DIR / "evaluation_results.csv").exists(),
             "summary_table": (config.RESULTS_DIR / "summary_table.csv").exists(),
+            "final_comparison_s0": (config.RESULTS_DIR / "final_comparison_S0.csv").exists(),
+            "final_comparison_s1": (config.RESULTS_DIR / "final_comparison_S1.csv").exists(),
             "rl_training_logs": (config.DATA_DIR / "rl_training_logs.csv").exists(),
         }
         return HealthResponse(
@@ -206,49 +215,6 @@ def create_app() -> FastAPI:
     ) -> GenerateWorkloadResponse:
         """Synthesizes a reproducible workload given scenario, process count, and seed."""
         return generate_workload_service(scenario=req.scenario, n=req.n, seed=req.seed)
-
-    @api.post(
-        "/api/simulate",
-        response_model=SimulateResponse,
-        responses={
-            400: {"model": ErrorResponse},
-            422: {"model": ErrorResponse},
-            503: {"model": ErrorResponse},
-        },
-        summary="Simulate CPU Scheduling Policy",
-    )
-    async def post_simulate(req: SimulateRequest) -> SimulateResponse:
-        """Executes simulation for a policy with ready-queue log and RL decision trace."""
-        domain_procs = processes_from_schemas(req.processes)
-        agent = api.state.q_agent_cs0 if req.cs_cost == 0 else api.state.q_agent_cs1
-        return run_simulation_service(
-            processes=domain_procs,
-            algorithm=req.algorithm,
-            quantum=req.quantum,
-            cs_cost=req.cs_cost,
-            rl_agent=agent,
-        )
-
-    @api.post(
-        "/api/compare",
-        response_model=CompareResponse,
-        responses={
-            400: {"model": ErrorResponse},
-            422: {"model": ErrorResponse},
-        },
-        summary="Compare Multiple Scheduling Policies",
-    )
-    async def post_compare(req: CompareRequest) -> CompareResponse:
-        """Benchmarks all candidate policies on a workload in a single round-trip."""
-        domain_procs = processes_from_schemas(req.processes)
-        agent = api.state.q_agent_cs0 if req.cs_cost == 0 else api.state.q_agent_cs1
-        return run_comparison_service(
-            processes=domain_procs,
-            algorithms=req.algorithms,
-            quantum=req.quantum,
-            cs_cost=req.cs_cost,
-            rl_agent=agent,
-        )
 
     @api.post(
         "/api/recommend",
@@ -327,33 +293,6 @@ def create_app() -> FastAPI:
             raise ModelMissingException("Train the model first: python cli.py train-rl")
 
         return json.loads(summary_p.read_text(encoding="utf-8"))
-
-    @api.get(
-        "/api/results/summary",
-        responses={503: {"model": ErrorResponse}},
-        summary="Final Benchmark Results and Report Tables",
-    )
-    async def get_results_summary() -> dict[str, Any]:
-        """Returns held-out test split summary table, scenario breakdown, and limitations."""
-        sum_p = config.RESULTS_DIR / "summary_table.csv"
-        scen_p = config.RESULTS_DIR / "scenario_breakdown.csv"
-        rep_p = config.DOCS_DIR / "REPORT_NOTES.md"
-
-        if not sum_p.exists():
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Run evaluation first: python cli.py evaluate",
-            )
-
-        sum_df = pd.read_csv(sum_p)
-        scen_df = pd.read_csv(scen_p) if scen_p.exists() else pd.DataFrame()
-        notes = rep_p.read_text(encoding="utf-8") if rep_p.exists() else ""
-
-        return {
-            "summary_table": sum_df.to_dict(orient="records"),
-            "scenario_breakdown": scen_df.to_dict(orient="records"),
-            "report_notes": notes,
-        }
 
     return api
 

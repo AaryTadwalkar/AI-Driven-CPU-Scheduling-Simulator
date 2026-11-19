@@ -1,17 +1,20 @@
 """
 1. What this file does:
    Implements domain-level service logic for the FastAPI backend, bridging HTTP schemas to
-   the unit-step simulation Engine, classical policies, Decision Tree, and Q-learning agents.
+   the unit-step simulation Engine, classical policies, Decision Tree, Random Forest, Q-learning,
+   GBDT ranker, and Neural candidate scoring agents, including final benchmark report retrieval.
 2. Overall design:
-   Contains business logic for simulation execution, step playback tracing, RL decision logging,
-   multi-policy comparative runs, and supervised recommendation. Enforces model availability
-   checks, raising ModelMissingException (translated to HTTP 503) when required artifacts
-   have not yet been trained.
+   Provides business logic for discrete simulation execution, step playback tracing, AI decision
+   logging, latency overhead accounting, multi-policy comparative benchmarking, supervised
+   recommendation, and final benchmark result ingestion. Enforces model availability checks,
+   raising ModelMissingException (HTTP 503) with prescriptive CLI training instructions.
 3. Elements in the file:
    - ModelMissingException: Exception indicating an AI model file is absent on disk.
+   - _resolve_model_train_command: Helper mapping model algorithm keys to CLI train commands.
    - processes_from_schemas: Converts Pydantic ProcessSchema items to domain Process objects.
    - run_simulation_service: Drives unit-step simulation with ready queue and decision logging.
-   - run_comparison_service: Benchmarks multiple policies on a workload.
+   - run_comparison_service: Benchmarks multiple policies on a workload with latency overhead.
+   - get_final_results_service: Ingests held-out test split final comparison CSV files.
    - run_recommend_service: Extracts features and queries Decision Tree recommendation.
    - generate_workload_service: Synthesizes synthetic workloads using deterministic RNG.
 4. Final output of the file:
@@ -22,10 +25,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 import config
 from schedsim.api.schemas import (
     CompareResponse,
     DecisionTraceEntry,
+    FinalComparisonResponse,
+    FinalComparisonRowSchema,
     GenerateWorkloadResponse,
     ProcessMetricsSchema,
     ProcessSchema,
@@ -77,6 +84,33 @@ class ModelMissingException(Exception):
         self.detail = detail
 
 
+def _resolve_model_train_command(algo_key: str) -> str:
+    """
+    1. The use of function:
+       Resolves the appropriate CLI training command for a missing AI model artifact.
+    2. How does the specific function work:
+       Matches canonical algorithm string prefixes and returns prescriptive training commands.
+    3. Concepts used in the function:
+       String matching, CLI command routing, error messaging.
+    4. Places where this function is imported and used:
+       Internal helper in service.py for ModelMissingException formatting.
+    5. Final output of the function, before and after:
+       Before: Algorithm key string.
+       After: CLI command string.
+    """
+    if algo_key in ("DT", "DECISION_TREE"):
+        return "python cli.py train-tree"
+    if algo_key in ("RF", "RANDOM_FOREST"):
+        return "python cli.py train-forest"
+    if algo_key in ("QLEARNING", "RL", "Q-LEARNING", "Q_LEARNING"):
+        return "python cli.py train-rl"
+    if algo_key in ("PID_GBDT", "GBDT", "GBDTRANKERPOLICY"):
+        return "python cli.py train-pid-gbdt"
+    if algo_key in ("PID_NN", "PID_NEURAL", "NEURAL", "NEURALCANDIDATEPOLICY"):
+        return "python cli.py train-pid-nn"
+    return "python cli.py train-tree"
+
+
 def processes_from_schemas(schemas: Sequence[ProcessSchema]) -> list[Process]:
     """
     1. The use of function:
@@ -107,64 +141,92 @@ def run_simulation_service(
     algorithm: str,
     quantum: int = 2,
     cs_cost: int = 0,
+    tick_us: float | None = None,
     rl_agent: QLearningAgent | None = None,
 ) -> SimulateResponse:
     """
     1. The use of function:
-       Executes simulation for a single policy, recording step playback and decision traces.
+       Executes discrete simulation for a single policy with latency overhead and playback logs.
     2. How does the specific function work:
-       Initializes Engine. For classical policies, queries policy registry. For QLEARNING/RL,
-       verifies rl_agent presence (or raises ModelMissingException), selecting actions greedily.
-       At each simulation tick, logs ready queue state; for RL, also logs state, valid actions,
-       Q-values, and step reward. Packages final SimResult into SimulateResponse.
+       Resolves algorithm using get_policy(), binds processes, triggers on_start() for upfront
+       overhead charging, steps Engine while collecting ready queue logs and RL decision traces,
+       charges per-decision AI inference latency, and compiles full SimulateResponse with metrics.
     3. Concepts used in the function:
-       Discrete unit-step simulation, playback logging, RL decision explainability.
+       Discrete unit-step simulation, playback logging, RL explainability, discrete tick overhead.
     4. Places where this function is imported and used:
-       Imported by simulate and compare routes.
+       Imported by simulate and compare routes and benchmark test suites.
     5. Final output of the function, before and after:
-       Before: Process list, algorithm name, quantum, context switch cost, and optional RL agent.
+       Before: Workload processes, algorithm string, quantum, context switch cost, tick duration.
        After: Complete SimulateResponse model with metrics, timeline, and traces.
     """
     algo_key = algorithm.strip().upper()
     is_rl = algo_key in ("QLEARNING", "RL", "Q-LEARNING", "Q_LEARNING")
+    train_cmd = _resolve_model_train_command(algo_key)
 
     policy: Policy | None = None
-    if is_rl:
-        if rl_agent is None:
-            raise ModelMissingException("Train the model first: python cli.py train-rl")
-    elif algo_key == "RR":
-        policy = get_policy("rr", quantum=quantum)
-    else:
-        policy = get_policy(algo_key.lower())
+    try:
+        if algo_key == "RR":
+            policy = get_policy("rr", quantum=quantum)
+        elif is_rl:
+            if rl_agent is not None:
+                policy = get_policy("rl", agent=rl_agent)
+            else:
+                target_f = config.MODELS_DIR / f"q_table_cs{cs_cost}.pkl"
+                fallback_f = config.MODELS_DIR / "q_table.pkl"
+                if not target_f.exists() and not fallback_f.exists():
+                    raise ModelMissingException(f"Train the model first: {train_cmd}")
+                policy = get_policy("rl", cs_cost=cs_cost, models_dir=config.MODELS_DIR)
+        else:
+            policy = get_policy(algo_key.lower())
+    except (FileNotFoundError, ModelMissingException):
+        raise ModelMissingException(f"Train the model first: {train_cmd}")
+    except KeyError:
+        raise ValueError(f"Unknown scheduling algorithm '{algorithm}'.")
 
-    engine = Engine(processes=processes, cs_cost=cs_cost)
+    engine = Engine(processes=processes, cs_cost=cs_cost, tick_us=tick_us)
     view = engine.reset()
 
-    if policy is not None and hasattr(policy, "reset"):
+    if hasattr(policy, "bind_workload") and callable(policy.bind_workload):
+        policy.bind_workload(processes)
+    elif hasattr(policy, "reset") and callable(policy.reset):
         policy.reset()
+
+    if hasattr(policy, "on_start") and callable(policy.on_start):
+        try:
+            start_cost_us = float(policy.on_start(processes))
+            if start_cost_us > 0.0:
+                engine.charge_start_overhead(start_cost_us)
+        except (FileNotFoundError, ModelMissingException):
+            raise ModelMissingException(f"Train the model first: {train_cmd}")
 
     ready_queue_log: list[ReadyQueueLogEntry] = []
     decision_trace: list[DecisionTraceEntry] | None = [] if is_rl else None
+    rl_agent_instance: QLearningAgent | None = (
+        getattr(policy, "agent", rl_agent) if is_rl else None
+    )
 
     while not engine.done:
         ready_pids = [p.pid for p in view.ready]
         current_tick = view.time
 
-        if is_rl:
-            assert rl_agent is not None
+        if is_rl and rl_agent_instance is not None:
             st = encode_state(
                 view,
                 more_arrivals_pending=engine.has_pending_arrivals,
             )
             val_acts = get_valid_actions(view)
-            q_vals = {ACTION_NAMES[a]: float(rl_agent.get_q(st, a)) for a in val_acts}
-            act = rl_agent.best_action(st, val_acts, record_unseen=False)
+            q_vals = {ACTION_NAMES[a]: float(rl_agent_instance.get_q(st, a)) for a in val_acts}
+            act = rl_agent_instance.best_action(st, val_acts, record_unseen=False)
             pid = action_to_pid(view, act)
         else:
             assert policy is not None
             pid = policy.select(view)
 
-        step_info = engine.step(pid)
+        cost_us = 0.0
+        if hasattr(policy, "decision_cost_us") and callable(policy.decision_cost_us):
+            cost_us = float(policy.decision_cost_us(view))
+
+        step_info = engine.step(pid, decision_cost_us=cost_us)
 
         ready_queue_log.append(
             ReadyQueueLogEntry(
@@ -174,8 +236,7 @@ def run_simulation_service(
             )
         )
 
-        if is_rl and decision_trace is not None:
-            assert rl_agent is not None
+        if is_rl and decision_trace is not None and rl_agent_instance is not None:
             decision_trace.append(
                 DecisionTraceEntry(
                     time=current_tick,
@@ -217,6 +278,11 @@ def run_simulation_service(
         throughput=float(sm.throughput),
         context_switches=int(sm.context_switches),
         jain_fairness=float(sm.jain_fairness),
+        ai_overhead_ticks=int(sm.ai_overhead_ticks),
+        decisions=int(sm.decisions),
+        inference_us_total=float(sm.inference_us_total),
+        effective_makespan=int(sm.effective_makespan),
+        effective_turnaround=float(sm.effective_turnaround),
     )
 
     t_segments = [
@@ -246,13 +312,14 @@ def run_comparison_service(
     algorithms: list[str] | None = None,
     quantum: int = 2,
     cs_cost: int = 0,
+    tick_us: float | None = None,
     rl_agent: QLearningAgent | None = None,
 ) -> CompareResponse:
     """
     1. The use of function:
        Runs all designated scheduling algorithms on a single workload for side-by-side comparison.
     2. How does the specific function work:
-       Resolves algorithm list (defaulting to FCFS, SJF, RR, SRTF, and RL if rl_agent available).
+       Resolves algorithm list (defaulting to classical baselines and RL if available).
        Simulates each policy via run_simulation_service, aggregates results into a dictionary,
        and builds a comparative summary table highlighting key metrics across policies.
     3. Concepts used in the function:
@@ -260,7 +327,7 @@ def run_comparison_service(
     4. Places where this function is imported and used:
        Imported by the /api/compare route handler.
     5. Final output of the function, before and after:
-       Before: Processes and optional algorithm list.
+       Before: Processes, algorithm list, quantum, context switch cost, and tick duration.
        After: CompareResponse with per-algorithm simulations and summary list.
     """
     if algorithms is None:
@@ -279,6 +346,7 @@ def run_comparison_service(
             algorithm=algo,
             quantum=quantum,
             cs_cost=cs_cost,
+            tick_us=tick_us,
             rl_agent=rl_agent,
         )
         results[algo] = sim_resp
@@ -293,9 +361,59 @@ def run_comparison_service(
             "makespan": sm.makespan,
             "cpu_utilization": sm.cpu_utilization,
             "jain_fairness": sm.jain_fairness,
+            "ai_overhead_ticks": sm.ai_overhead_ticks,
+            "decisions": sm.decisions,
+            "inference_us_total": sm.inference_us_total,
+            "effective_makespan": sm.effective_makespan,
+            "effective_turnaround": sm.effective_turnaround,
         })
 
     return CompareResponse(results=results, comparison_summary=summary_rows)
+
+
+def get_final_results_service(
+    results_dir: Path | str | None = None,
+) -> FinalComparisonResponse:
+    """
+    1. The use of function:
+       Reads held-out test split final comparison CSV files and returns structured response.
+    2. How does the specific function work:
+       Resolves results directory (defaults to config.RESULTS_DIR). Checks existence of
+       final_comparison_S0.csv and final_comparison_S1.csv; if absent, raises
+       ModelMissingException. Parses each CSV into FinalComparisonRowSchema instances and returns
+       FinalComparisonResponse with S0 and S1 keys.
+    3. Concepts used in the function:
+       CSV data ingestion, Pydantic validation, benchmark reporting.
+    4. Places where this function is imported and used:
+       Imported by /api/results/final route handler.
+    5. Final output of the function, before and after:
+       Before: Disk CSV files.
+       After: Structured FinalComparisonResponse instance.
+    """
+    res_dir = Path(results_dir) if results_dir is not None else config.RESULTS_DIR
+    p_s0 = res_dir / "final_comparison_S0.csv"
+    p_s1 = res_dir / "final_comparison_S1.csv"
+
+    if not p_s0.exists() or not p_s1.exists():
+        raise ModelMissingException(
+            "Run final comparison first: python cli.py compare-all"
+        )
+
+    df_s0 = pd.read_csv(p_s0)
+    df_s1 = pd.read_csv(p_s1)
+
+    records_s0 = df_s0.where(pd.notnull(df_s0), None).to_dict(orient="records")
+    records_s1 = df_s1.where(pd.notnull(df_s1), None).to_dict(orient="records")
+
+    rows_s0 = [FinalComparisonRowSchema(**r) for r in records_s0]
+    rows_s1 = [FinalComparisonRowSchema(**r) for r in records_s1]
+
+    return FinalComparisonResponse(
+        S0=rows_s0,
+        S1=rows_s1,
+        s0=rows_s0,
+        s1=rows_s1,
+    )
 
 
 def run_recommend_service(
@@ -380,6 +498,7 @@ def generate_workload_service(
 __all__ = [
     "ModelMissingException",
     "generate_workload_service",
+    "get_final_results_service",
     "processes_from_schemas",
     "run_comparison_service",
     "run_recommend_service",

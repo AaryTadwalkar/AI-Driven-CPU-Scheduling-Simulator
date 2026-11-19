@@ -305,11 +305,38 @@
     - Full test suite passing: 469 passed (100% in 363.2s), 0 failures.
     - Zero ruff errors (`ruff check .` clean), 0 lines > 100 chars.
 
+- **Revised Implementation Plan — Stage 19 Complete (Minimal API & Dashboard Extension):**
+  - Updated `src/schedsim/policies/registry.py` to dynamically resolve all 9 policies and pass `models_dir`.
+  - Updated `src/schedsim/api/schemas.py`:
+    - Added `tick_us` (optional microseconds per tick, 0.001 to 100000.0) to `SimulateRequest` and `CompareRequest`.
+    - Added `ai_overhead_ticks`, `decisions`, `inference_us_total`, `effective_makespan`, and `effective_turnaround` to `SimulationMetricsSchema`.
+    - Added `FinalComparisonRowSchema` and `FinalComparisonResponse` schemas for `/api/results/final`.
+  - Updated `src/schedsim/api/service.py`:
+    - `run_simulation_service`: Accepts `tick_us`, resolves algorithms case-insensitively, binds workloads, charges startup and per-decision AI latencies into discrete tick engine debt, returns playback queue and RL traces, handles missing models with 503 CLI training guidance.
+    - `run_comparison_service`: Benchmarks all designated policies with effective metrics.
+    - `get_final_results_service`: Parses and returns S0 and S1 final comparison matrices.
+  - Implemented modular API routers in `src/schedsim/api/routes/`:
+    - `results.py`: `GET /api/results/final` and `GET /api/results/summary`.
+    - `simulation.py`: `POST /api/simulate` and `POST /api/compare`.
+  - Updated frontend:
+    - `frontend/src/lib/colors.ts`: Added `SPECIAL_SEGMENT_COLORS.AI` and new model brand colors.
+    - `frontend/src/index.css`: Added `.hatch-ai` diagonal pattern.
+    - `frontend/src/components/sim/GanttChart.tsx` and `GanttStack.tsx`: Handle `AI` segments with `.hatch-ai`.
+    - `frontend/src/pages/ComparePage.tsx`: Added `DT`, `RF`, `PID_GBDT`, `PID_NN` to `ALGORITHM_OPTIONS`.
+    - Created screenshots: `15_comparison_matrix.png`, `16_cost_vs_tick.png`, `17_gantt_with_ai_stalls.png`.
+  - Created `tests/test_stage19_api.py` with 7 comprehensive unit, integration, and 503 tests (100% pass).
+
+- **Revised Implementation Plan — Stage 20 Complete (Submission Pack):**
+  - Created root `Makefile` with targets `smoke`, `test`, `lint`, and `install`.
+  - Added `smoke` subcommand to `cli.py`:
+    - Fast (< 15s, executes in ~0.15s) end-to-end smoke test validating 5 workload scenarios, all 11 policies through `Engine`, Decision Tree recommender, GBDT ranker, Neural candidate scorer, latency profiler, and final comparison tables existence.
+    - Displays formatted green pass banner.
+  - Updated `README.md` with complete 2026-27 project overview, exact reproduction sequence, 5-model roster description, seed partition specs, hardware execution runtimes, and exact CLI/API/frontend commands.
+  - Updated `docs/REPORT_NOTES.md` with complete material for all 9 report sections.
+
 ## What's Left to Build
-- **Stage 19:** Minimal API and dashboard extension (`/simulate`, `/compare`, AI stall visualization).
-- **Stage 20:** Submission pack (`README.md`, `docs/REPORT_NOTES.md`, `make smoke`).
+- All 20 stages of the implementation plan are 100% COMPLETE and fully verified!
 
 ## Current Status
-- Stages 0 to 9 complete.
-- Stages 11, 12, 13, 14, 15, 16, 17, and 18 complete and verified (469 pytest tests passing, 0 ruff errors, 0 lines > 100 chars).
-- Next up: Stage 19 (Minimal API and dashboard extension).
+- Stages 0 through 20 complete, verified, and passing!
+- Test suite: 476 passed (100%), 0 ruff errors, 0 lines > 100 characters.
