@@ -198,21 +198,24 @@ def evaluate_decision_tree(
 
 def recommend(
     processes: Sequence[Process],
-    model_path: Path | str = config.MODELS_DIR / "decision_tree.joblib",
+    model: str = "dt",
+    setting: str = "S1",
+    model_path: Optional[Path | str] = None,
 ) -> dict[str, Any]:
     """
     1. The use of function:
        Single-point public inference API recommending an optimal scheduling policy for a workload.
     2. How does the specific function work:
-       Validates raw processes, extracts the 12 workload features, loads the fitted Decision Tree
-       model (cached in memory for high-performance inference), predicts the optimal policy,
+       Validates raw processes, extracts the 12 workload features, resolves the requested model
+       ('dt' or 'rf') and benchmark setting ('S0' or 'S1') or custom model_path, loads the fitted
+       estimator (cached in memory for high-performance inference), predicts the optimal policy,
        extracts class probabilities, and returns a structured prediction package.
     3. Concepts used in the function:
        Model inference, in-memory caching, probabilistic classification, input validation.
     4. Places where this function is imported and used:
-       Imported by CLI recommend command, FastAPI recommender routes, and Stage 4 acceptance tests.
+       Imported by SelectorPolicy, CLI recommend command, REST API, and test suites.
     5. Final output of the function, before and after:
-       Before: Sequence of raw Process domain entities.
+       Before: Sequence of raw Process domain entities, model type, setting, or model_path.
        After: Dictionary with 'algorithm' string, 'probabilities' dict, and 'features' dict.
     """
     if not isinstance(processes, Sequence) or isinstance(processes, (str, bytes)):
@@ -222,26 +225,54 @@ def recommend(
     proc_list = list(processes)
     validate_processes(proc_list)
 
-    str_path = str(model_path)
-    if str_path not in _MODEL_CACHE:
+    if model_path is not None:
         target_path = Path(model_path)
+    else:
+        model_key = model.lower().strip()
+        if model_key in ("dt", "decision_tree"):
+            model_prefix = "decision_tree"
+        elif model_key in ("rf", "random_forest"):
+            model_prefix = "random_forest"
+        else:
+            raise ValueError(
+                f"Unknown model type '{model}'. Must be 'dt' or 'rf'."
+            )
+
+        setting_key = setting.upper().strip()
+        if setting_key not in config.SETTINGS:
+            valid_settings = ", ".join(config.SETTINGS.keys())
+            raise ValueError(
+                f"Unknown setting '{setting}'. Must be one of: {valid_settings}."
+            )
+
+        target_path = config.MODELS_DIR / f"{model_prefix}_{setting_key}.joblib"
+        if (
+            not target_path.exists()
+            and setting_key == "S1"
+            and model_prefix == "decision_tree"
+            and (config.MODELS_DIR / "decision_tree.joblib").exists()
+        ):
+            target_path = config.MODELS_DIR / "decision_tree.joblib"
+
+    str_path = str(target_path)
+    if str_path not in _MODEL_CACHE:
         if not target_path.exists():
             raise FileNotFoundError(
                 f"Trained Decision Tree model not found at {target_path}. "
-                "Run `python cli.py train-tree` first."
+                "Train Category 1 models first."
             )
         _MODEL_CACHE[str_path] = joblib.load(target_path)
 
-    model: DecisionTreeClassifier = _MODEL_CACHE[str_path]
+    loaded_model = _MODEL_CACHE[str_path]
 
     feats = extract_features(proc_list)
     feature_vector = np.array([[feats[col] for col in FEATURE_NAMES]], dtype=np.float64)
 
-    predicted_class = str(model.predict(feature_vector)[0])
-    probabilities_raw = model.predict_proba(feature_vector)[0]
+    predicted_class = str(loaded_model.predict(feature_vector)[0])
+    probabilities_raw = loaded_model.predict_proba(feature_vector)[0]
     probabilities = {
         str(cls_name): float(prob)
-        for cls_name, prob in zip(model.classes_, probabilities_raw)
+        for cls_name, prob in zip(loaded_model.classes_, probabilities_raw)
     }
 
     return {

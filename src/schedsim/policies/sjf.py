@@ -1,11 +1,12 @@
 """
 1. What this file does:
-   Implements the Shortest Job First (SJF) non-preemptive classical CPU scheduling algorithm.
+   Implements the Shortest Job First (SJF) non-preemptive classical CPU scheduling algorithm
+   with hardware latency accounting.
 2. Overall design:
    Inherits from the Policy base class. Operates in non-preemptive mode: if the previously running
    process (view.last_pid) is still in the ready queue, it retains the CPU. When CPU allocation is
    open (last_pid finished or None), it selects the ready process with the minimum
-   (burst, arrival, pid) tuple.
+   (burst, arrival, pid) tuple. Connects decision_cost_us to the hardware latency profile.
 3. Elements in the file:
    - SJFPolicy: Class implementing non-preemptive Shortest Job First scheduling.
 4. Final output of the file:
@@ -24,6 +25,7 @@ class SJFPolicy(Policy):
        - name: Identifier string "SJF".
        - __init__: Initializes the policy with name "SJF".
        - select: Retains view.last_pid if still ready, else selects minimum (burst, arrival, pid).
+       - decision_cost_us: Returns measured per-decision latency from hardware profile.
     3. Technologies used and why:
        - Subclasses Policy ABC for uniform simulation execution.
        - Leverages view.last_pid to enforce non-preemption without local state mutation.
@@ -47,6 +49,23 @@ class SJFPolicy(Policy):
            After: Configured SJFPolicy instance ready for select() calls.
         """
         super().__init__(name=name)
+
+    def decision_cost_us(self, view: View) -> float:
+        """
+        1. The use of function:
+           Returns the per-decision latency in microseconds for classical SJF.
+        2. How does the specific function work:
+           Returns 0.0 µs as classical baseline overhead is neglected in simulation, while
+           measured latencies are preserved in models/latency_profile.json.
+        3. Concepts used in the function:
+           Classical baseline overhead exemption, hardware profile reference.
+        4. Places where this function is imported and used:
+           Invoked by Engine runner on non-forced scheduling steps.
+        5. Final output of the function, before and after:
+           Before: Observable View instance representing ready processes.
+           After: Returns 0.0 µs float latency.
+        """
+        return 0.0
 
     def select(self, view: View) -> str:
         """

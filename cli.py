@@ -14,9 +14,15 @@
    - handle_simulate: Handler executing policy simulation on preset workloads and printing output.
    - handle_build_workloads: Handler generating synthetic workloads and saving to CSV.
    - handle_build_dataset: Handler generating labeled supervised dataset and saving to CSV.
+   - handle_build_pid_data: Handler generating process-level behavioral datasets (Stage 14).
+   - handle_train_pid_gbdt: Handler training GBDT candidate rankers for S0/S1 (Stage 15).
+   - handle_train_pid_nn: Handler training neural candidate scorers for S0/S1 (Stage 16).
+   - handle_bench_latency: Handler benchmarking policy latencies and cost profile (Stage 17).
    - handle_train_tree: Handler fitting Decision Tree recommender and evaluating baselines.
    - handle_recommend: Handler running inference to recommend policy for a workload.
    - handle_train_rl: Handler executing tabular Q-learning training and hyperparameter search.
+   - handle_evaluate: Handler executing evaluation across held-out splits.
+   - handle_compare_all: Handler executing Stage 18 final comparison across all 11 policies.
    - build_parser: Function constructing the CLI argument parser and defining subcommands.
    - main: Main execution function parsing CLI arguments and dispatching requested subcommands.
 4. Final output of the file:
@@ -40,10 +46,19 @@ from schedsim.evaluation import (
     export_summary_tables,
     generate_all_plots,
     run_evaluation_experiments,
+    run_final_comparison,
 )
 from schedsim.ml.dataset_builder import build_dataset, save_dataset_to_csv
 from schedsim.ml.evaluate_tree import evaluate_decision_tree, recommend
 from schedsim.ml.train_tree import train_decision_tree
+from schedsim.pidsel.dataset import (
+    generate_and_save_pid_datasets,
+    generate_dataset_report,
+)
+from schedsim.pidsel.gbdt_ranker import (
+    evaluate_gbdt_on_validation,
+    train_gbdt,
+)
 from schedsim.policies.registry import get_policy
 from schedsim.rl.evaluate import plot_action_distribution, plot_learning_curves
 from schedsim.rl.train import run_hparam_search, train_final_agents, train_q_learning
@@ -408,6 +423,386 @@ def handle_build_dataset(args: argparse.Namespace) -> int:
         f"Ambiguous Samples:         {ambig_count} ({ambig_pct:.1f}%)",
         sep,
     ])
+    print("\n".join(lines))
+    return 0
+
+
+def handle_build_pid_data(args: argparse.Namespace) -> int:
+    """
+    1. The use of function:
+       Executes `build-pid-data` CLI subcommand to generate process-level behavioral datasets.
+    2. How does the specific function work:
+       Loads train workloads, executes parallel simulation under the rollout oracle for S0 and S1,
+       saves compressed NPZ datasets, compiles an analytical report, and prints execution stats.
+    3. Concepts used in the function:
+       Behavioral cloning dataset generation, rollout oracle search, comparative analysis report.
+    4. Places where this function is imported and used:
+       Dispatched by `main()` in `cli.py` when `command == 'build-pid-data'`.
+    5. Final output of the function, before and after:
+       Before: Parsed CLI options for dataset directory, capacity limits, and report path.
+       After: Datasets and report persisted, summary printed, returns 0 on success.
+    """
+    data_dir = getattr(args, "data_dir", "data")
+    report_path = getattr(args, "report", "results/pid_dataset_report.md")
+    max_states = getattr(args, "max_states", config.PID_MAX_STATES)
+    workers = getattr(args, "workers", None)
+
+    try:
+        t0 = time.perf_counter()
+        s0_path, s1_path = generate_and_save_pid_datasets(
+            data_dir=data_dir,
+            max_states=max_states,
+            n_workers=workers,
+        )
+        rep = generate_dataset_report(
+            npz_s0_path=s0_path,
+            npz_s1_path=s1_path,
+            report_path=report_path,
+        )
+        elapsed = time.perf_counter() - t0
+    except (ValueError, TypeError, OSError) as exc:
+        print(f"PID dataset building error: {exc}", file=sys.stderr)
+        return 1
+
+    sep = "=" * 80
+    lines = [
+        sep,
+        "Process-Level Behavioral Cloning Dataset Report (Stage 14)",
+        sep,
+        f"S0 Dataset:                {s0_path}",
+        f"S1 Dataset:                {s1_path}",
+        f"Analytical Report:         {rep}",
+        f"Execution Time:            {elapsed:.2f}s",
+        sep,
+    ]
+    print("\n".join(lines))
+    return 0
+
+
+def handle_train_pid_gbdt(args: argparse.Namespace) -> int:
+    """
+    1. The use of function:
+       Executes `train-pid-gbdt` CLI subcommand to train GBDT candidate rankers for S0/S1.
+    2. How does the specific function work:
+       Parses setting ("S0", "S1", or "both"), data_dir, models_dir, and val_eval flag.
+       Calls train_gbdt for designated setting(s), and if val_eval is requested,
+       evaluates the model(s) on validation workloads and saves metrics to results.
+       Prints execution time and summary metrics table.
+    3. Concepts used in the function:
+       CLI command handling, model training orchestration, validation benchmark evaluation.
+    4. Places where this function is imported and used:
+       Dispatched by `main()` in `cli.py` when `command == 'train-pid-gbdt'`.
+    5. Final output of the function, before and after:
+       Before: Parsed CLI namespace arguments.
+       After: Models trained and saved, validation metrics compiled, returns 0 on success.
+    """
+    from typing import Any
+
+    setting_arg = getattr(args, "setting", "both").upper().strip()
+    data_dir = getattr(args, "data_dir", config.DATA_DIR)
+    models_dir = getattr(args, "models_dir", config.MODELS_DIR)
+    val_eval = getattr(args, "val_eval", False)
+    max_states = getattr(args, "max_states", None)
+    n_val_workloads = getattr(args, "n_val_workloads", 500)
+
+    settings_to_train: list[str]
+    if setting_arg == "BOTH":
+        settings_to_train = ["S0", "S1"]
+    elif setting_arg in ("S0", "S1"):
+        settings_to_train = [setting_arg]
+    else:
+        print(f"Error: Unknown setting '{setting_arg}'. Must be S0, S1, or both.", file=sys.stderr)
+        return 1
+
+    try:
+        t0 = time.perf_counter()
+        summary_rows: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
+        for s in settings_to_train:
+            _, artifact = train_gbdt(
+                setting=s,
+                data_dir=data_dir,
+                models_dir=models_dir,
+                max_states=max_states,
+            )
+            val_metrics: dict[str, Any] | None = None
+            if val_eval:
+                val_metrics = evaluate_gbdt_on_validation(
+                    artifact,
+                    setting=s,
+                    n_workloads=n_val_workloads,
+                    data_dir=data_dir,
+                )
+            summary_rows.append((s, artifact, val_metrics))
+        elapsed = time.perf_counter() - t0
+    except (ValueError, TypeError, OSError, FileNotFoundError) as exc:
+        print(f"GBDT training error: {exc}", file=sys.stderr)
+        return 1
+
+    sep = "=" * 80
+    lines = [
+        sep,
+        "GBDT Candidate Ranker Training Report (Stage 15)",
+        sep,
+        f"Execution Time:            {elapsed:.2f}s",
+    ]
+    for s, art, val in summary_rows:
+        lines.append(f"Setting:                   {s}")
+        lines.append(f"Model Path:                {models_dir}/pid_gbdt_{s}.joblib")
+        lines.append(f"Trees:                     {len(art['trees'])}")
+        if val is not None:
+            lines.append(f"Top-1 Agreement (Oracle):  {val['top1_agreement'] * 100:.2f}%")
+            lines.append(f"Mean J_policy:             {val['mean_j_policy']:.4f}")
+            lines.append(f"Gap vs Oracle:             {val['closed_loop_gap_oracle'] * 100:.3f}%")
+            lines.append(f"Gap vs SRTF:               {val['closed_loop_gap_srtf'] * 100:.3f}%")
+        lines.append("-" * 40)
+    lines.append(sep)
+    print("\n".join(lines))
+    return 0
+
+
+def handle_train_pid_nn(args: argparse.Namespace) -> int:
+    """
+    1. The use of function:
+       Executes `train-pid-nn` CLI subcommand to train neural candidate scorer models for S0/S1.
+    2. How does the specific function work:
+       Parses CLI options: setting ("S0", "S1", or "both"), data_dir, models_dir, dagger_iters,
+       epochs_per_iter, lr, max_states, and n_val_workloads. Invokes `train_neural_scorer()` for
+       designated settings, saves pure-NumPy weights, metadata JSON, and multi-seed validation
+       summaries to `results/pid_m2_val.csv`. Prints execution time and summary metrics.
+    3. Concepts used in the function:
+       CLI command handling, neural behavioral cloning, DAgger loop execution, validation reporting.
+    4. Places where this function is imported and used:
+       Dispatched by `main()` in `cli.py` when `command == 'train-pid-nn'`.
+    5. Final output of the function, before and after:
+       Before: Parsed CLI namespace arguments.
+       After: Neural models trained and saved, validation metrics recorded, returns 0 on success.
+    """
+    from typing import Any
+
+    from schedsim.pidsel.train_bc import train_neural_scorer
+
+    setting_arg = getattr(args, "setting", "both").upper().strip()
+    data_dir = getattr(args, "data_dir", config.DATA_DIR)
+    models_dir = getattr(args, "models_dir", config.MODELS_DIR)
+    dagger_iters = getattr(args, "dagger_iters", config.DAGGER_ITERS)
+    epochs = getattr(args, "epochs", 15)
+    lr = getattr(args, "lr", 1e-3)
+    max_states = getattr(args, "max_states", 30000)
+    n_val = getattr(args, "n_val_workloads", 200)
+
+    settings_to_train: list[str]
+    if setting_arg == "BOTH":
+        settings_to_train = ["S0", "S1"]
+    elif setting_arg in config.SETTINGS:
+        settings_to_train = [setting_arg]
+    else:
+        valid = ", ".join(config.SETTINGS.keys())
+        print(f"Error: Unknown setting '{setting_arg}'. Valid choices: {valid}, both.")
+        return 1
+
+    start_time = time.time()
+    summary_rows: list[dict[str, Any]] = []
+
+    for s in settings_to_train:
+        print(f"\nTraining Neural Candidate Scorer for {s}...")
+        meta = train_neural_scorer(
+            setting=s,
+            data_dir=data_dir,
+            models_dir=models_dir,
+            dagger_iters=dagger_iters,
+            epochs_per_iter=epochs,
+            lr=lr,
+            max_train_states=max_states,
+            n_val_workloads=n_val,
+        )
+        summary_rows.append(meta)
+
+    elapsed = time.time() - start_time
+    sep = "=" * 80
+    lines = [
+        sep,
+        "Neural Candidate Scorer Training Report (Stage 16)",
+        sep,
+        f"Execution Time:            {elapsed:.2f}s",
+    ]
+    for meta in summary_rows:
+        s = meta["setting"]
+        best = meta["best_seed_metrics"]
+        summ = meta["seeds_summary"]
+        lines.append(f"Setting:                   {s}")
+        lines.append(f"Model Path:                {models_dir}/pid_scorer_{s}_np.npz")
+        lines.append(f"Best Seed:                 {meta['best_seed']}")
+        lines.append(f"Top-1 Agreement:           {best['top1_agreement'] * 100:.2f}%")
+        lines.append(f"Mean J_policy:             {best['mean_waiting_time']:.4f}")
+        lines.append(f"Gap vs Oracle:             {best['gap_vs_oracle'] * 100:.3f}%")
+        lines.append(f"Gap vs SRTF:               {best['gap_vs_srtf'] * 100:.3f}%")
+        lines.append(
+            f"Multi-Seed Waiting:        "
+            f"{summ['waiting_mean']:.4f} +/- {summ['waiting_std']:.4f}"
+        )
+        lines.append("-" * 40)
+    lines.append(sep)
+    print("\n".join(lines))
+    return 0
+
+
+def handle_bench_latency(args: argparse.Namespace) -> int:
+    """
+    1. The use of function:
+       Executes `bench-latency` CLI command benchmarking all scheduling policies and ML models.
+    2. How does the specific function work:
+       Parses benchmark options (n_warmup, n_timed, n_repeats, output, plot, skip_plot).
+       Executes benchmark_all() across ready queue sizes (2, 3, 5, 8, 10) and workload sizes
+       (3, 5, 8, 10, 15, 20). Persists structured JSON profile to disk, optionally generates
+       latency vs n_ready plot, runs live-vs-table validation checks, and prints formatted tables.
+    3. Concepts used in the function:
+       Micro-benchmarking execution, JSON profile generation, tabular formatting, validation.
+    4. Places where this function is imported and used:
+       Dispatched by main() in cli.py when command == 'bench-latency'.
+    5. Final output of the function, before and after:
+       Before: Command arguments parsed.
+       After: latency_profile.json and plot generated, summary printed, returns 0 on success.
+    """
+    import logging
+
+    from schedsim.domain.process import Process
+    from schedsim.overhead import (
+        benchmark_all,
+        plot_latency_profile,
+        save_latency_profile,
+        validate_live_vs_table,
+    )
+    from schedsim.pidsel.gbdt_ranker import GBDTRankerPolicy
+    from schedsim.pidsel.scorer_net import NeuralCandidatePolicy
+
+    logger = logging.getLogger(__name__)
+
+    output_path = getattr(args, "output", config.MODELS_DIR / "latency_profile.json")
+    plot_path = getattr(args, "plot", config.RESULTS_DIR / "figures" / "latency_vs_ready.png")
+    n_warmup = getattr(args, "n_warmup", 200)
+    n_timed = getattr(args, "n_timed", 2000)
+    n_repeats = getattr(args, "n_repeats", 3)
+    skip_plot = getattr(args, "skip_plot", False)
+
+    print("Running CPU Scheduling Policy Hardware Latency Benchmarks...")
+    t0 = time.time()
+
+    profile = benchmark_all(
+        n_warmup_decision=n_warmup,
+        n_timed_decision=n_timed,
+        n_warmup_startup=max(10, n_warmup // 4),
+        n_timed_startup=max(50, n_timed // 4),
+        n_repeats=n_repeats,
+    )
+
+    save_latency_profile(profile, output_path)
+    print(f"Latency profile saved to: {output_path}")
+
+    if not skip_plot:
+        plot_latency_profile(profile, plot_path)
+        print(f"Latency curve plot saved to: {plot_path}")
+
+    # Validation check on 5-process sample workload
+    val_procs = [
+        Process(pid=f"P{i + 1}", arrival=i, burst=4 + (i % 3))
+        for i in range(5)
+    ]
+    val_results = []
+    for pol_cls in (NeuralCandidatePolicy, GBDTRankerPolicy):
+        try:
+            pol_inst = pol_cls.from_setting("S1")
+            val_res = validate_live_vs_table(
+                pol_inst, val_procs, cs_cost=1, tolerance=0.15
+            )
+            val_results.append(val_res)
+        except Exception as exc:
+            logger.warning(f"Validation check skipped for {pol_cls.__name__}: {exc}")
+
+    elapsed = time.time() - t0
+    sep = "=" * 80
+    subsep = "-" * 80
+
+    os_info = f"{profile['machine_info']['os']} {profile['machine_info']['os_release']}"
+    lines = [
+        sep,
+        "Hardware Latency Profile and Cost Model Report (Stage 17)",
+        sep,
+        f"Benchmark Duration:         {elapsed:.2f}s",
+        f"Warmup / Timed Iterations:  {n_warmup} / {n_timed} (repeats={n_repeats})",
+        "",
+        "Host Machine Information:",
+        f"  CPU:                      {profile['machine_info']['cpu']}",
+        f"  OS:                       {os_info}",
+        f"  Python Version:           {profile['machine_info']['python_version']}",
+        f"  Timestamp:                {profile['machine_info']['timestamp']}",
+        "",
+        "Per-Decision Dispatch Latency (median µs / p95 µs):",
+        subsep,
+        f"{'Policy':<14} {'n=2':<12} {'n=3':<12} {'n=5':<12} {'n=8':<12} {'n=10':<12}",
+        subsep,
+    ]
+
+    for pol_name, points in profile["per_decision"].items():
+        row_parts = [f"{pol_name:<14}"]
+        for n_str in ("2", "3", "5", "8", "10"):
+            if n_str in points:
+                med = points[n_str]["median_us"]
+                p95 = points[n_str]["p95_us"]
+                row_parts.append(f"{med:.1f}/{p95:.1f}".center(12))
+            else:
+                row_parts.append("-".center(12))
+        lines.append(" ".join(row_parts))
+
+    lines.extend([
+        subsep,
+        "",
+        "Category 1 Upfront Startup Latency (median µs / p95 µs):",
+        subsep,
+        (
+            f"{'Model':<14} {'sz=3':<10} {'sz=5':<10} {'sz=8':<10} "
+            f"{'sz=10':<10} {'sz=15':<10} {'sz=20':<10}"
+        ),
+        subsep,
+    ])
+
+    for model_name, points in profile["startup"].items():
+        display_name = "Decision Tree" if model_name == "DT" else "Random Forest"
+        row_parts = [f"{display_name:<14}"]
+        for sz_str in ("3", "5", "8", "10", "15", "20"):
+            if sz_str in points:
+                med = points[sz_str]["median_us"]
+                p95 = points[sz_str]["p95_us"]
+                row_parts.append(f"{med:.1f}/{p95:.1f}".center(10))
+            else:
+                row_parts.append("-".center(10))
+        lines.append(" ".join(row_parts))
+
+    if val_results:
+        lines.extend([
+            subsep,
+            "",
+            "Live Timing vs Table Cost Validation Check:",
+            subsep,
+            (
+                f"{'Policy':<20} {'Decisions':<10} {'Live (µs)':<12} "
+                f"{'Table (µs)':<12} {'Gap (%)':<10} {'Status':<8}"
+            ),
+            subsep,
+        ])
+        for vr in val_results:
+            status_str = "PASS" if vr["within_tolerance"] else "FLAGGED"
+            gap_pct_str = f"{vr['percentage_gap']:.1f}%"
+            lines.append(
+                f"{vr['policy']:<20} {vr['decisions']:<10} {vr['live_us_total']:<12.1f} "
+                f"{vr['table_us_total']:<12.1f} {gap_pct_str:<10} {status_str:<8}"
+            )
+
+    lines.extend([
+        subsep,
+        f"Artifact: {output_path}",
+        sep,
+    ])
+
     print("\n".join(lines))
     return 0
 
@@ -794,6 +1189,71 @@ def handle_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_compare_all(args: argparse.Namespace) -> int:
+    """
+    1. The use of function:
+       Executes Stage 18 final comparison across all 11 policies on S0 and S1 test splits.
+    2. How does the specific function work:
+       Extracts n_workloads, tick_us, skip_plots, and output_dir from parsed arguments.
+       Invokes run_final_comparison(), which simulates classical, category 1/2/3 AI policies,
+       and oracle/best-classical references, computes 15-column comparison matrices with bootstrap
+       CIs, generates publication figures, and evaluates pre-registered hypotheses H1-H4.
+       Prints summary Markdown tables to terminal and reports generated artifact paths.
+    3. Concepts used in the function:
+       CLI subcommand dispatching, multi-setting benchmark reporting, terminal formatting.
+    4. Places where this function is imported and used:
+       Dispatched by main() when subcommand is 'compare-all'.
+    5. Final output of the function, before and after:
+       Before: Raw CLI arguments.
+       After: Executes comparison suite, prints tables and artifact paths, returns 0 on success.
+    """
+    sep = "=" * 80
+    print(sep)
+    print("SCHEDSIM FINAL COMPARISON SUITE (Stage 18: The Deliverable)")
+    print(sep)
+    print(f"Workload Count:      {args.n_workloads}")
+    print(f"Default Tick (us):   {args.tick_us}")
+    print(f"Skip Plots:          {args.skip_plots}")
+    print(f"Output Directory:    {args.output_dir}")
+    print(sep)
+
+    out_dir = Path(args.output_dir) if args.output_dir else config.RESULTS_DIR
+
+    results = run_final_comparison(
+        n_workloads=args.n_workloads,
+        tick_us=args.tick_us,
+        skip_plots=args.skip_plots,
+        output_dir=out_dir,
+    )
+
+    print("\n" + sep)
+    print("FINAL COMPARISON RESULTS - SETTING S0 (cs_cost = 0)")
+    print(sep)
+    s0_md_path = out_dir / "final_comparison_S0.md"
+    if s0_md_path.exists():
+        print(s0_md_path.read_text(encoding="utf-8"))
+
+    print("\n" + sep)
+    print("FINAL COMPARISON RESULTS - SETTING S1 (cs_cost = 1)")
+    print(sep)
+    s1_md_path = out_dir / "final_comparison_S1.md"
+    if s1_md_path.exists():
+        print(s1_md_path.read_text(encoding="utf-8"))
+
+    print("\n" + sep)
+    print("GENERATED DELIVERABLES & ARTIFACTS")
+    print(sep)
+    print(f"  Comparison Tables: {out_dir / 'final_comparison_S0.csv'}, {s0_md_path}")
+    print(f"                     {out_dir / 'final_comparison_S1.csv'}, {s1_md_path}")
+    print(f"  Hypotheses Results:{results['hypotheses_path']}")
+    if not args.skip_plots and results.get("figures"):
+        print("  Figures:")
+        for fig in results["figures"]:
+            print(f"    - {fig}")
+    print(sep)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """
     1. The use of function:
@@ -1056,6 +1516,204 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of parallel worker processes (default: CPU count)",
     )
 
+    # build-pid-data sub-command (Stage 14)
+    pid_data_parser = subparsers.add_parser(
+        "build-pid-data",
+        help="Build process-level behavioral cloning datasets and report (Stage 14)",
+    )
+    pid_data_parser.add_argument(
+        "--data-dir",
+        type=str,
+        default="data",
+        help="Directory to save NPZ datasets (default: data)",
+    )
+    pid_data_parser.add_argument(
+        "--report",
+        type=str,
+        default="results/pid_dataset_report.md",
+        help="Path for dataset analysis Markdown report (default: results/pid_dataset_report.md)",
+    )
+    pid_data_parser.add_argument(
+        "--max-states",
+        type=int,
+        default=config.PID_MAX_STATES,
+        help=f"Maximum states per setting (default: {config.PID_MAX_STATES})",
+    )
+    pid_data_parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of parallel worker processes (default: CPU count)",
+    )
+
+    # train-pid-gbdt sub-command (Stage 15)
+    pid_gbdt_parser = subparsers.add_parser(
+        "train-pid-gbdt",
+        help="Train GBDT candidate ranker models for S0 and/or S1 (Stage 15)",
+    )
+    pid_gbdt_parser.add_argument(
+        "--setting",
+        type=str,
+        default="both",
+        choices=["S0", "S1", "both", "s0", "s1", "BOTH"],
+        help="Setting to train: S0, S1, or both (default: both)",
+    )
+    pid_gbdt_parser.add_argument(
+        "--data-dir",
+        type=str,
+        default="data",
+        help="Directory containing training datasets (default: data)",
+    )
+    pid_gbdt_parser.add_argument(
+        "--models-dir",
+        type=str,
+        default="models",
+        help="Directory to save trained model artifacts (default: models)",
+    )
+    pid_gbdt_parser.add_argument(
+        "--val-eval",
+        action="store_true",
+        help="Run validation evaluation after training",
+    )
+    pid_gbdt_parser.add_argument(
+        "--max-states",
+        type=int,
+        default=None,
+        help="Optional maximum states to train on (default: all)",
+    )
+    pid_gbdt_parser.add_argument(
+        "--n-val-workloads",
+        type=int,
+        default=500,
+        help="Number of validation workloads to evaluate (default: 500)",
+    )
+
+    # train-pid-nn sub-command (Stage 16)
+    pid_nn_parser = subparsers.add_parser(
+        "train-pid-nn",
+        help="Train Neural candidate scorer models for S0 and/or S1 (Stage 16)",
+    )
+    pid_nn_parser.add_argument(
+        "--setting",
+        type=str,
+        default="both",
+        choices=["S0", "S1", "both", "s0", "s1", "BOTH"],
+        help="Setting to train: S0, S1, or both (default: both)",
+    )
+    pid_nn_parser.add_argument(
+        "--data-dir",
+        type=str,
+        default="data",
+        help="Directory containing training datasets (default: data)",
+    )
+    pid_nn_parser.add_argument(
+        "--models-dir",
+        type=str,
+        default="models",
+        help="Directory to save trained model artifacts (default: models)",
+    )
+    pid_nn_parser.add_argument(
+        "--dagger-iters",
+        type=int,
+        default=config.DAGGER_ITERS,
+        help="Number of DAgger iterations (default: 2)",
+    )
+    pid_nn_parser.add_argument(
+        "--epochs",
+        type=int,
+        default=15,
+        help="Epochs per DAgger iteration (default: 15)",
+    )
+    pid_nn_parser.add_argument(
+        "--lr",
+        type=float,
+        default=1e-3,
+        help="Adam learning rate (default: 0.001)",
+    )
+    pid_nn_parser.add_argument(
+        "--max-states",
+        type=int,
+        default=30000,
+        help="Maximum initial states to train on (default: 30000)",
+    )
+    pid_nn_parser.add_argument(
+        "--n-val-workloads",
+        type=int,
+        default=200,
+        help="Number of validation workloads to evaluate (default: 200)",
+    )
+
+    bench_parser = subparsers.add_parser(
+        "bench-latency",
+        help="Run micro-benchmarks for all scheduling policies and Category 1 models.",
+    )
+    bench_parser.add_argument(
+        "--output",
+        type=Path,
+        default=config.MODELS_DIR / "latency_profile.json",
+        help="Target JSON output path for the latency profile.",
+    )
+    bench_parser.add_argument(
+        "--plot",
+        type=Path,
+        default=config.RESULTS_DIR / "figures" / "latency_vs_ready.png",
+        help="Target image output path for the latency vs n_ready plot.",
+    )
+    bench_parser.add_argument(
+        "--n-warmup",
+        type=int,
+        default=200,
+        help="Number of warmup iterations per policy/candidate sweep point (default: 200).",
+    )
+    bench_parser.add_argument(
+        "--n-timed",
+        type=int,
+        default=2000,
+        help="Number of timed iterations per policy/candidate sweep point (default: 2000).",
+    )
+    bench_parser.add_argument(
+        "--n-repeats",
+        type=int,
+        default=3,
+        help="Number of repeat measurements (default: 3).",
+    )
+    bench_parser.add_argument(
+        "--skip-plot",
+        action="store_true",
+        help="Skip generating the latency plot figure.",
+    )
+
+    compare_all_parser = subparsers.add_parser(
+        "compare-all",
+        help="Run full final comparison across all 11 policies for S0 and S1 (Stage 18).",
+    )
+    compare_all_parser.add_argument(
+        "--n-workloads",
+        type=int,
+        default=1000,
+        help="Number of test workloads to evaluate (default: 1000).",
+    )
+    compare_all_parser.add_argument(
+        "--tick-us",
+        type=float,
+        default=config.DEFAULT_TICK_US,
+        help=(
+            "Baseline hardware tick duration in microseconds "
+            f"(default: {config.DEFAULT_TICK_US})."
+        ),
+    )
+    compare_all_parser.add_argument(
+        "--skip-plots",
+        action="store_true",
+        help="Skip generating publication figures.",
+    )
+    compare_all_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=config.RESULTS_DIR,
+        help="Target output directory for tables and figures (default: results).",
+    )
+
     return parser
 
 
@@ -1093,6 +1751,18 @@ def main(args: Optional[List[str]] = None) -> int:
     if parsed_args.command == "build-dataset":
         return handle_build_dataset(parsed_args)
 
+    if parsed_args.command == "build-pid-data":
+        return handle_build_pid_data(parsed_args)
+
+    if parsed_args.command == "train-pid-gbdt":
+        return handle_train_pid_gbdt(parsed_args)
+
+    if parsed_args.command == "train-pid-nn":
+        return handle_train_pid_nn(parsed_args)
+
+    if parsed_args.command == "bench-latency":
+        return handle_bench_latency(parsed_args)
+
     if parsed_args.command == "train-tree":
         return handle_train_tree(parsed_args)
 
@@ -1104,6 +1774,9 @@ def main(args: Optional[List[str]] = None) -> int:
 
     if parsed_args.command == "evaluate":
         return handle_evaluate(parsed_args)
+
+    if parsed_args.command == "compare-all":
+        return handle_compare_all(parsed_args)
 
     print(
         f"Command '{parsed_args.command}' received. Implementation active in subsequent stages."

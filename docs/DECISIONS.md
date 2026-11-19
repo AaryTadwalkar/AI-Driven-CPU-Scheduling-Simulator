@@ -47,3 +47,63 @@ This document records key technical decisions, rationale, deviations from the ba
   - `cs0_q2_standard`: Rejected because 0 context switch penalty artificially favors RR preemption.
   - `cs1_q4_standard`: Larger quantum (q=4) slightly degrades RR responsiveness without changing the balance advantage.
 
+## Decision 005: Strict 5-Model Roster Scope & Deprecations
+- **Status:** Accepted
+- **Context:** `REVISED_IMPLEMENTATION_PLAN.md` supersedes the complex model scope of `PID_SELECTOR_ADDENDUM_PLAN.md` (Stages 11–21) to prioritize simplicity and answer: *Which scheduler does best once AI execution overhead is charged?*
+- **Decision:** Restrict trained models strictly to 5:
+  1. Algorithm-level: Decision Tree (baseline, charged once)
+  2. Algorithm-level: Random Forest (stronger, charged once)
+  3. Algorithm-level (rule-level): Tabular Q-learning (charged per non-forced decision)
+  4. Process-level (PID): GBDT Candidate Ranker (charged per non-forced decision)
+  5. Process-level (PID): Neural Candidate Scorer (Deep Learning, charged per non-forced decision)
+- **Rationale:** Focuses research directly on model types (classical ML vs deep learning) and decision scopes (algorithm-level vs process-level) without superfluous training pipelines.
+- **Alternatives Rejected / Dropped:** PPO fine-tuned scorer (unstable, requires critic/KL tuning with low expected delta over supervised scorer), k-NN model, majority-class model as a model (kept as a reference scalar), exact DP solver, SLOWDOWN objective, HoldPolicy, T-large/T-holdout datasets, and Wilcoxon/Holm tests.
+
+## Decision 006: Category 1 Model Strategy (DT Baseline vs RF Strong)
+- **Status:** Accepted
+- **Context:** Category 1 models decide the scheduling algorithm once per workload at startup.
+- **Decision:** Use Decision Tree as the interpretable baseline and Random Forest as the strong model. Evaluate both on validation regret.
+- **Rationale:** Because inference is charged only once per workload, the small latency difference between DT and RF (sub-millisecond) is negligible compared to total workload duration; therefore, accuracy and lower regret dominate.
+- **Alternatives Rejected:** MLP or Gradient Boosting for Category 1 (tabular data with 12 structural features is already optimal for tree ensembles).
+
+## Decision 007: Q-Learning Category & Charging Convention
+- **Status:** Accepted
+- **Context:** Q-learning was trained in Stage 6 to select among 4 meta-rules.
+- **Decision:** Retain Q-learning in the algorithm/rule-level group, but charge inference per non-forced decision tick.
+- **Rationale:** The agent selects a dispatch rule tick-by-tick rather than scoring individual process IDs. Charging per decision accurately reflects its dynamic dispatch cost.
+
+## Decision 008: Settings S0 and S1 with Waiting Time Objective
+- **Status:** Accepted
+- **Context:** Need standard evaluation benchmarks for preemption penalties.
+- **Decision:** Restrict all subsequent experiments strictly to S0 (`cs_cost = 0`) and S1 (`cs_cost = 1`) under the total waiting time objective.
+- **Rationale:** S0 provides an empirical sanity check (SRTF optimality bound). S1 introduces non-zero preemption penalties where AI schedulers can learn switching economy. Adding slowdown objectives would double computation without altering qualitative conclusions.
+
+## Decision 009: Deep Learning Implementation Boundaries
+- **Status:** Accepted
+- **Context:** Model 5 requires a deep learning neural scorer with permutation-equivariant candidate scoring.
+- **Decision:** Permit PyTorch for offline training with DAgger; export learned weights to NumPy arrays (`.npz`) for zero-dependency, pure-NumPy runtime inference.
+- **Rationale:** Documented, controlled relaxation of the zero-DL rule for training only; ensures uniform, lightweight NumPy-based inference during benchmarking.
+
+## Decision 010: Rollout Oracle with Two Base Policies
+- **Status:** Accepted
+- **Context:** PID models require expert supervision labels for candidate ranking.
+- **Decision:** Build a rollout oracle based on `ORACLE_BASE_POLICIES = ("SRTF", "SJF")` with immediate penalty and best rollout completion.
+- **Rationale:** Validated by S0 matching SRTF and S1 bounded by $\le \min(\text{SRTF}, \text{SJF})$, eliminating the need for an intractable exponential DP solver.
+
+## Decision 011: Strict Test Split Preservation
+- **Status:** Accepted
+- **Context:** Evaluation integrity across both Part A (Stages 0–9) and Part B (Stages 10–20).
+- **Decision:** Keep test split seeds 200,000–200,999 untouched until Stage 18 final comparison. Register hypotheses in `docs/HYPOTHESES.md` prior to executing the test benchmark.
+- **Rationale:** Prevents data snooping and model overfitting on the test partition.
+
+## Decision 012: Category 1 Per-Setting Retraining & Backward Compatibility
+- **Status:** Accepted
+- **Context:** Stage 12 requires per-setting datasets (`scheduling_dataset_S0.csv`, `scheduling_dataset_S1.csv`) and separate models for Decision Tree and Random Forest for S0 and S1.
+- **Decision:**
+  1. Generate independent datasets for S0 (`cs_cost=0`) and S1 (`cs_cost=1`), validating class distributions (< 85% dominance). In S0: RR 60.3%, SJF 31.2%, FCFS 8.5%. In S1: SJF 52.8%, RR 27.7%, FCFS 19.6%.
+  2. Perform 5-fold cross-validated grid search for DT and RF independently per setting.
+  3. Mirror `decision_tree_S1.joblib` and metadata to `decision_tree.joblib` to maintain 100% backward compatibility with Part A tests.
+  4. Implement `SelectorPolicy` with upfront `on_start()` inference charging and zero per-decision latency.
+  5. Register `DT` and `RF` aliases in the central policy registry without modifying the baseline `list_policies()` output, preserving all Part A classical registry tests.
+
+

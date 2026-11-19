@@ -27,9 +27,23 @@
 - **Composite Labeling:** Multi-objective normalized cost combining waiting time (50%), response time (30%), turnaround time (20%), and context switch cost.
 
 ### 4. Strict Seed Isolation
-- **Train Split:** 0 – 99,999 (workloads for dataset generation and RL training episodes).
+- **Train Split:** 0 – 99,999 (workloads for dataset generation, RL episodes, and PID supervision).
 - **Validation Split:** 100,000 – 100,499 (hyperparameter tuning and validation curves).
 - **Test Split:** 200,000 – 200,999 (final untouched evaluation benchmark).
+
+### 5. Revised 5-Model Roster & AI Overhead Accounting
+- **The 5-Model Roster (strictly bounded):**
+  1. Algorithm-level: Decision Tree (Classical ML baseline; charged once at start via `on_start`)
+  2. Algorithm-level: Random Forest (Classical ML strong; charged once at start via `on_start`)
+  3. Algorithm-level / rule-level: Tabular Q-learning (RL; charged per non-forced decision via `decision_cost_us`)
+  4. Process-level (PID): GBDT Candidate Ranker (Classical ML; charged per non-forced decision via `decision_cost_us`)
+  5. Process-level (PID): Neural Candidate Scorer (Deep Learning; charged per non-forced decision via `decision_cost_us`)
+- **Overhead Accounting Model:**
+  - Microsecond latency converted to discrete simulation ticks via assumed `tick_us` (sweep: 1, 10, 100, 1000, 10000 µs/tick; default 1000 µs).
+  - Fractional debt accumulator charges full stall ticks labeled `AI` on the timeline.
+  - Forced decisions (single ready process) are free for all schedulers.
+  - Metrics include `effective_makespan` and `effective_turnaround`.
+
 
 ## Code Style & Documentation Standards
 - **File Docstrings:** 1. File purpose, 2. Overall design, 3. Elements in file, 4. Final output.

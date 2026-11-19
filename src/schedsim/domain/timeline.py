@@ -5,10 +5,12 @@
 2. Overall design:
    Provides discrete-time execution logging for scheduling engines. Merges consecutive atomic
    ticks into contiguous intervals labelled with process identifiers, context switches ('CS'),
-   or idle periods ('IDLE'), and verifies partition integrity over [0, makespan).
+   idle periods ('IDLE'), or AI inference stalls ('AI'), and verifies partition integrity
+   over [0, makespan).
 3. Elements in the file:
-   - CS_LABEL: String constant for context switch overhead execution intervals.
-   - IDLE_LABEL: String constant for idle CPU intervals.
+   - AI_LABEL: String constant for AI model inference stall intervals ('AI').
+   - CS_LABEL: String constant for context switch overhead execution intervals ('CS').
+   - IDLE_LABEL: String constant for idle CPU intervals ('IDLE').
    - TimelineSegment: Frozen dataclass representing a discrete half-open execution interval.
    - Timeline: Mutable execution tracker collecting ticks and segments with merging and validation.
 4. Final output of the file:
@@ -20,6 +22,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
+AI_LABEL: Final[str] = "AI"
 CS_LABEL: Final[str] = "CS"
 IDLE_LABEL: Final[str] = "IDLE"
 
@@ -116,6 +119,7 @@ class Timeline:
        - makespan: Maximum end tick recorded in the timeline.
        - busy_ticks: Total ticks spent executing process tasks.
        - overhead_ticks: Total ticks consumed by context switches ('CS').
+       - ai_ticks: Total ticks consumed by AI inference stall overhead ('AI').
        - idle_ticks: Total ticks spent idling ('IDLE').
        - validate_partition: Verifies gapless and overlap-free coverage of [0, makespan).
     3. Technologies used and why:
@@ -251,7 +255,7 @@ class Timeline:
         1. The use of function:
            Calculates total ticks spent actively executing process workloads.
         2. How does the specific function work:
-           Sums duration of all merged segments whose label is neither 'CS' nor 'IDLE'.
+           Sums duration of all merged segments whose label is neither 'CS', 'IDLE', nor 'AI'.
         3. Concepts used in the function:
            Category filtering, interval duration summation, CPU work accounting.
         4. Places where this function is imported and used:
@@ -263,7 +267,7 @@ class Timeline:
         return sum(
             s.duration
             for s in self.to_segments()
-            if s.label not in (CS_LABEL, IDLE_LABEL)
+            if s.label not in (CS_LABEL, IDLE_LABEL, AI_LABEL)
         )
 
     @property
@@ -285,6 +289,27 @@ class Timeline:
             s.duration
             for s in self.to_segments()
             if s.label == CS_LABEL
+        )
+
+    @property
+    def ai_ticks(self) -> int:
+        """
+        1. The use of function:
+           Calculates total ticks consumed by AI inference stall overhead ('AI').
+        2. How does the specific function work:
+           Sums duration of all merged segments whose label matches AI_LABEL ('AI').
+        3. Concepts used in the function:
+           AI overhead accounting, filtered summation.
+        4. Places where this function is imported and used:
+           Used in aggregate metrics reporting and AI inference overhead analysis.
+        5. Final output of the function, before and after:
+           Before: Property accessed on timeline.
+           After: Returns non-negative integer sum of AI inference stall ticks.
+        """
+        return sum(
+            s.duration
+            for s in self.to_segments()
+            if s.label == AI_LABEL
         )
 
     @property
@@ -405,4 +430,4 @@ class Timeline:
         return self.to_segments() == other.to_segments()
 
 
-__all__ = ["CS_LABEL", "IDLE_LABEL", "Timeline", "TimelineSegment"]
+__all__ = ["AI_LABEL", "CS_LABEL", "IDLE_LABEL", "Timeline", "TimelineSegment"]

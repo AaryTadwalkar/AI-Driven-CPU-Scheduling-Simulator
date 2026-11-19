@@ -142,6 +142,23 @@ class RoundRobinPolicy(Policy):
         """
         return tuple(self._deque)
 
+    def decision_cost_us(self, view: View) -> float:
+        """
+        1. The use of function:
+           Returns the per-decision latency in microseconds for classical Round Robin.
+        2. How does the specific function work:
+           Returns 0.0 µs as classical baseline overhead is neglected in simulation, while
+           measured latencies are preserved in models/latency_profile.json.
+        3. Concepts used in the function:
+           Classical baseline overhead exemption, hardware profile reference.
+        4. Places where this function is imported and used:
+           Invoked by Engine runner on non-forced scheduling steps.
+        5. Final output of the function, before and after:
+           Before: Observable View instance representing ready processes.
+           After: Returns 0.0 µs float latency.
+        """
+        return 0.0
+
     def reset(self) -> None:
         """
         1. The use of function:

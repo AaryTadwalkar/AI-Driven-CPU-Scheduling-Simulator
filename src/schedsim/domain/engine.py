@@ -1,19 +1,21 @@
 """
 1. What this file does:
    Implements the core discrete unit-step CPU scheduling simulation engine, state views,
-   step execution logic, scripted testing policy, and execution runner.
+   step execution logic, AI model inference stall overhead accounting, engine cloning,
+   scripted testing policy, and execution runner.
 2. Overall design:
    Provides a deterministic discrete-event simulation engine advancing integer tick intervals
    [t, t+1). Features exact context switch overhead accounting, idle time jumping, ready queue
-   admission tracking, process lifecycle recording, and step penalty calculation matching
-   reinforcement learning reward semantics.
+   admission tracking, process lifecycle recording, AI model latency conversion to stall ticks
+   via a fractional debt accumulator, and step penalty calculation matching reinforcement
+   learning reward semantics.
 3. Elements in the file:
    - ProcView: Frozen dataclass representing an immutable process snapshot for policies.
    - View: Frozen dataclass representing the observable simulation state at a discrete tick.
    - StepInfo: Frozen dataclass returning penalty, resulting view, and completion flag per step.
    - SimResult: Frozen dataclass encapsulating process metrics, simulation metrics, and timeline.
    - ScriptedPolicy: Policy driven by a predetermined sequence of PIDs or a custom callable.
-   - Engine: Central stateful simulation engine driving unit-step scheduling execution.
+   - Engine: Central stateful simulation engine driving unit-step execution with AI stalls.
    - run: Simulation loop helper executing a policy over a process workload to completion.
 4. Final output of the file:
    Exports Engine, ProcView, View, StepInfo, SimResult, ScriptedPolicy, and run for domain,
@@ -31,7 +33,7 @@ from schedsim.domain.metrics import (
     calculate_simulation_metrics,
 )
 from schedsim.domain.process import Process, validate_processes
-from schedsim.domain.timeline import CS_LABEL, IDLE_LABEL, Timeline
+from schedsim.domain.timeline import AI_LABEL, CS_LABEL, IDLE_LABEL, Timeline
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,7 @@ class View:
        - ready: Tuple of ProcView instances currently awaiting CPU execution.
        - last_pid: Identifier of the process that ran in the preceding execution tick, or None.
        - newly_arrived: Tuple of PIDs admitted since the previous View was produced.
+       - pending_arrivals: Non-negative integer count of unadmitted processes remaining.
        - __post_init__: Type and integrity validation for all view attributes.
     3. Technologies used and why:
        - Frozen dataclass with immutable nested tuples for leak-free policy querying.
@@ -138,6 +141,7 @@ class View:
     ready: tuple[ProcView, ...]
     last_pid: str | None
     newly_arrived: tuple[str, ...]
+    pending_arrivals: int = 0
 
     def __post_init__(self) -> None:
         """
@@ -145,7 +149,8 @@ class View:
            Validates View attribute types and collection integrity upon instantiation.
         2. How does the specific function work:
            Checks time is a non-negative integer, ready is a tuple of ProcViews, last_pid is
-           a non-empty string or None, and newly_arrived is a tuple of non-empty strings.
+           a non-empty string or None, newly_arrived is a tuple of non-empty strings, and
+           pending_arrivals is a non-negative integer.
         3. Concepts used in the function:
            Dataclass post-init hook, collection integrity checking, defensive programming.
         4. Places where this function is imported and used:
@@ -182,6 +187,16 @@ class View:
         for pid in self.newly_arrived:
             if not isinstance(pid, str) or not pid.strip():
                 raise ValueError("View newly_arrived item must be a non-empty string.")
+
+        if (
+            isinstance(self.pending_arrivals, bool)
+            or not isinstance(self.pending_arrivals, int)
+            or self.pending_arrivals < 0
+        ):
+            raise ValueError(
+                f"View pending_arrivals must be a non-negative int, "
+                f"got {self.pending_arrivals}."
+            )
 
 
 @dataclass(frozen=True)
@@ -391,14 +406,16 @@ class ScriptedPolicy:
 class Engine:
     """
     1. The use of class:
-       Central discrete unit-step CPU scheduling simulation engine.
+       Central discrete unit-step CPU scheduling simulation engine supporting context switches,
+       idle time jumps, AI model inference stalls, and state cloning.
     2. What the class contains:
        - _processes: Tuple of Process domain objects defining the workload.
        - _proc_map: Dictionary mapping PID strings to Process instances.
        - _cs_cost: Non-negative integer tick cost for context switches.
+       - _tick_us: Microseconds of real time represented by one simulation tick, or None.
        - _time: Current simulation integer tick timestamp.
        - _last_pid: PID of the process dispatched in the previous execution tick, or None.
-       - _timeline: Timeline recorder capturing process, context switch, and idle intervals.
+       - _timeline: Timeline recorder capturing process, context switch, AI stall, and idle ticks.
        - _context_switches: Integer counter tracking total context switch occurrences.
        - _remaining: Dictionary tracking remaining burst ticks per process.
        - _waited: Dictionary tracking accumulated ready-queue wait ticks per process.
@@ -409,30 +426,48 @@ class Engine:
        - _ready_set: Set of PIDs currently ready and awaiting CPU execution.
        - _completed: Set of PIDs that have completed execution.
        - _current_view: Current View instance representing available ready tasks.
+       - _ai_debt: Accumulated fractional AI inference stall tick debt.
+       - _ai_overhead_ticks: Total integer AI inference stall ticks charged.
+       - _decisions: Total count of non-forced scheduling decisions made.
+       - _inference_us_total: Total raw model inference latency accumulated in microseconds.
+       - _start_cost_us: One-time upfront model cost in microseconds awaiting first dispatch.
        - reset: Resets engine state, executes initial idle jump if needed, and returns initial View.
+       - charge_start_overhead: Records one-time upfront model inference latency for the workload.
        - step: Executes one unit step of simulation for the chosen PID and returns StepInfo.
+       - clone: Creates an independent isolated deep copy of the engine state.
+       - restore: Restores engine execution state from a checkpoint.
        - done: Property indicating whether all processes have completed execution.
        - time: Property returning the current simulation time.
        - timeline: Property returning the Timeline recorder instance.
        - context_switches: Property returning total context switches dispatched.
        - current_view: Property returning current observable View snapshot.
        - has_pending_arrivals: Property indicating whether any unadmitted processes remain.
+       - ai_overhead_ticks: Property returning total AI stall ticks charged.
+       - decisions: Property returning non-forced decisions count.
+       - inference_us_total: Property returning cumulative raw inference latency in microseconds.
+       - tick_us: Property returning microseconds per simulation tick or None.
        - result: Packages process metrics, aggregate simulation metrics, and execution timeline.
     3. Technologies used and why:
        - Discrete-event unit-step simulation modeling interval [t, t+1).
+       - Fractional debt accumulator converting microsecond latencies to integer stall ticks.
        - Conservation of time and waiting penalties matching reinforcement learning rewards.
     4. Key design and overall design of the class:
        Implements a strict, reproducible simulation contract across classical, heuristic,
        and reinforcement learning policies with exact overhead accounting and idle jumping.
     """
 
-    def __init__(self, processes: Sequence[Process], cs_cost: int = 0) -> None:
+    def __init__(
+        self,
+        processes: Sequence[Process],
+        cs_cost: int = 0,
+        tick_us: float | None = None,
+    ) -> None:
         """
         1. The use of function:
-           Initializes a new Engine with workload processes and context switch cost.
+           Initializes a new Engine with workload processes, context switch cost, and tick scale.
         2. How does the specific function work:
-           Validates processes via validate_processes, validates cs_cost >= 0, initializes internal
-           tracking structures, and triggers reset() to establish the initial state.
+           Validates processes and cs_cost >= 0, validates tick_us > 0 if provided, initializes
+           internal tracking structures, and triggers reset() to establish the initial state.
         3. Concepts used in the function:
            Defensive parameter validation, immutable collection copying, initial state setup.
         4. Places where this function is imported and used:
@@ -446,6 +481,17 @@ class Engine:
             raise TypeError(f"cs_cost must be an int, got {type(cs_cost).__name__}.")
         if cs_cost < 0:
             raise ValueError(f"cs_cost must be >= 0, got {cs_cost}.")
+
+        if tick_us is not None:
+            if isinstance(tick_us, bool) or not isinstance(tick_us, (int, float)):
+                raise TypeError(
+                    f"tick_us must be a float, int or None, got {type(tick_us).__name__}."
+                )
+            if tick_us <= 0:
+                raise ValueError(f"tick_us must be strictly positive, got {tick_us}.")
+            self._tick_us: float | None = float(tick_us)
+        else:
+            self._tick_us = None
 
         self._processes: tuple[Process, ...] = tuple(processes)
         self._proc_map: dict[str, Process] = {p.pid: p for p in self._processes}
@@ -466,6 +512,12 @@ class Engine:
         self._ready_set: set[str] = set()
         self._completed: set[str] = set()
         self._current_view: View | None = None
+
+        self._ai_debt: float = 0.0
+        self._ai_overhead_ticks: int = 0
+        self._decisions: int = 0
+        self._inference_us_total: float = 0.0
+        self._start_cost_us: float = 0.0
 
         self.reset()
 
@@ -528,11 +580,13 @@ class Engine:
                 key=lambda pid: (self._proc_map[pid].arrival, pid),
             )
         )
+        pending_arrivals = len(self._processes) - len(self._admitted)
         return View(
             time=self._time,
             ready=ready_views,
             last_pid=self._last_pid,
             newly_arrived=sorted_newly_arrived,
+            pending_arrivals=pending_arrivals,
         )
 
     def reset(self) -> View:
@@ -566,6 +620,12 @@ class Engine:
         self._ready_set = set()
         self._completed = set()
 
+        self._ai_debt = 0.0
+        self._ai_overhead_ticks = 0
+        self._decisions = 0
+        self._inference_us_total = 0.0
+        self._start_cost_us = 0.0
+
         admitted = self._admit_new_arrivals()
 
         if not self._ready_set:
@@ -577,18 +637,41 @@ class Engine:
         self._current_view = self._build_view(newly_arrived=admitted)
         return self._current_view
 
-    def step(self, pid: str) -> StepInfo:
+    def charge_start_overhead(self, cost_us: float) -> None:
         """
         1. The use of function:
-           Executes a single discrete unit step of simulation for the chosen PID.
+           Records a one-time upfront inference/feature-extraction overhead cost for the workload.
         2. How does the specific function work:
-           Validates engine is not done and pid is in ready set. If switching from a different
-           last_pid with cs_cost > 0, records cs_cost 'CS' ticks, admitting arrivals and charging
-           wait penalties. Runs 1 execution tick for pid, updates remaining burst, wait times,
-           and timeline. Handles completion, admits new arrivals, performs idle jump if ready queue
-           is empty, updates last_pid, and returns StepInfo.
+           Validates cost_us >= 0.0 and accumulates it into _start_cost_us to be converted to
+           AI stall ticks at the first dispatch.
         3. Concepts used in the function:
-           Unit-step execution, context switch overhead, idle jumping, penalty accounting.
+           One-time workload-level model inference charging, Category 1 ML model accounting.
+        4. Places where this function is imported and used:
+           Invoked by run() or external benchmark harnesses prior to stepping the engine.
+        5. Final output of the function, before and after:
+           Before: _start_cost_us has previous accumulated start cost.
+           After: _start_cost_us increased by float(cost_us).
+        """
+        if isinstance(cost_us, bool) or not isinstance(cost_us, (int, float)):
+            raise TypeError(f"cost_us must be numeric, got {type(cost_us).__name__}.")
+        if cost_us < 0:
+            raise ValueError(f"cost_us cannot be negative, got {cost_us}.")
+        self._start_cost_us += float(cost_us)
+
+    def step(self, pid: str, decision_cost_us: float = 0.0) -> StepInfo:
+        """
+        1. The use of function:
+           Executes a single discrete unit step of simulation for the chosen PID, accounting for
+           AI inference overhead, context switch costs, and execution progress.
+        2. How does the specific function work:
+           Validates inputs. Identifies non-forced decisions (ready_set > 1) to increment
+           decisions counter and accumulate raw inference latency. Adds any one-time start cost
+           on first dispatch. Converts chargeable microseconds into discrete AI stall ticks via
+           the fractional debt accumulator. Records any context switches. Executes 1 CPU tick for
+           pid, updates completion, admits arrivals, handles idle jumping, and returns StepInfo.
+        3. Concepts used in the function:
+           Unit-step execution, non-forced decision identification, fractional debt accumulation,
+           AI stall overhead, context switch penalty, idle jumping, reward preservation.
         4. Places where this function is imported and used:
            Called on every simulation step by run(), RL environments, and tests.
         5. Final output of the function, before and after:
@@ -604,9 +687,57 @@ class Engine:
                 f"Process '{pid}' is not in ready queue. "
                 f"Available ready PIDs: {sorted(self._ready_set)}."
             )
+        if isinstance(decision_cost_us, bool) or not isinstance(
+            decision_cost_us, (int, float)
+        ):
+            raise TypeError(
+                f"decision_cost_us must be numeric, got {type(decision_cost_us).__name__}."
+            )
+        if decision_cost_us < 0:
+            raise ValueError(
+                f"decision_cost_us cannot be negative, got {decision_cost_us}."
+            )
 
         step_penalty = 0
         step_newly_arrived: list[str] = []
+
+        is_non_forced = len(self._ready_set) > 1
+        if is_non_forced:
+            self._decisions += 1
+            self._inference_us_total += float(decision_cost_us)
+            cost_to_charge_us = float(decision_cost_us)
+        else:
+            cost_to_charge_us = 0.0
+
+        if self._start_cost_us > 0.0:
+            self._inference_us_total += self._start_cost_us
+            cost_to_charge_us += self._start_cost_us
+            self._start_cost_us = 0.0
+
+        if self._tick_us is not None and self._tick_us > 0.0 and cost_to_charge_us > 0.0:
+            self._ai_debt += cost_to_charge_us / self._tick_us
+            stall_ticks = int(self._ai_debt + 1e-9)
+            if stall_ticks > 0:
+                self._ai_debt -= stall_ticks
+                self._ai_overhead_ticks += stall_ticks
+                remaining_stalls = stall_ticks
+                while remaining_stalls > 0:
+                    if self.has_pending_arrivals:
+                        next_arr = min(
+                            p.arrival for p in self._processes if p.pid not in self._admitted
+                        )
+                        chunk = min(remaining_stalls, max(1, next_arr - self._time))
+                    else:
+                        chunk = remaining_stalls
+
+                    self._timeline.record_segment(self._time, self._time + chunk, AI_LABEL)
+                    for r_pid in self._ready_set:
+                        self._waited[r_pid] += chunk
+                    step_penalty += chunk * len(self._ready_set)
+                    self._time += chunk
+                    remaining_stalls -= chunk
+                    admitted_now = self._admit_new_arrivals()
+                    step_newly_arrived.extend(admitted_now)
 
         if self._last_pid is not None and pid != self._last_pid:
             self._context_switches += 1
@@ -759,6 +890,167 @@ class Engine:
         """
         return len(self._admitted) < len(self._processes)
 
+    @property
+    def ai_overhead_ticks(self) -> int:
+        """
+        1. The use of function:
+           Returns the total number of AI stall ticks incurred by model inference.
+        2. How does the specific function work:
+           Returns the integer counter _ai_overhead_ticks.
+        3. Concepts used in the function:
+           AI overhead tracking, property accessor.
+        4. Places where this function is imported and used:
+           Used by simulation metric calculators, audit logging, and unit tests.
+        5. Final output of the function, before and after:
+           Before: Property accessed on Engine instance.
+           After: Returns integer count of AI stall ticks.
+        """
+        return self._ai_overhead_ticks
+
+    @property
+    def decisions(self) -> int:
+        """
+        1. The use of function:
+           Returns the total number of non-forced scheduling decisions made during simulation.
+        2. How does the specific function work:
+           Returns the integer counter _decisions.
+        3. Concepts used in the function:
+           Decision counting, non-forced decision identification, property accessor.
+        4. Places where this function is imported and used:
+           Used by metrics calculations, test verifications, and comparison tables.
+        5. Final output of the function, before and after:
+           Before: Property accessed on Engine instance.
+           After: Returns integer count of non-forced decisions.
+        """
+        return self._decisions
+
+    @property
+    def inference_us_total(self) -> float:
+        """
+        1. The use of function:
+           Returns the cumulative raw AI model inference latency in microseconds.
+        2. How does the specific function work:
+           Returns the float counter _inference_us_total.
+        3. Concepts used in the function:
+           Microsecond latency accounting, property accessor.
+        4. Places where this function is imported and used:
+           Used by metrics calculations, latency profiles, and cost model evaluation.
+        5. Final output of the function, before and after:
+           Before: Property accessed on Engine instance.
+           After: Returns total raw inference microseconds as a float.
+        """
+        return self._inference_us_total
+
+    @property
+    def tick_us(self) -> float | None:
+        """
+        1. The use of function:
+           Returns the simulation tick time constant in microseconds per tick.
+        2. How does the specific function work:
+           Returns the configured _tick_us float or None if unconstrained.
+        3. Concepts used in the function:
+           Time scale conversion factor, property accessor.
+        4. Places where this function is imported and used:
+           Used by latency-to-tick conversion, test verifications, and experiment runners.
+        5. Final output of the function, before and after:
+           Before: Property accessed on Engine instance.
+           After: Returns configured tick_us float or None.
+        """
+        return self._tick_us
+
+    def clone(self) -> "Engine":
+        """
+        1. The use of function:
+           Creates an independent deep copy of the engine's mutable execution state.
+        2. How does the specific function work:
+           Allocates a new Engine instance without running __init__, copies immutable process
+           references and settings, duplicates all mutable collections (remaining, waited,
+           completion, timeline, ready/completed sets), and returns the isolated clone.
+        3. Concepts used in the function:
+           Object cloning, state isolation, defensive copying, MCTS/rollout branch exploration.
+        4. Places where this function is imported and used:
+           Used by rollout oracles (Stage 13), lookahead search heuristics, and state checkpoints.
+        5. Final output of the function, before and after:
+           Before: Original Engine instance at current simulation state.
+           After: Returns a new Engine instance with identical state; stepping either instance
+           does not affect the other.
+        """
+        cloned = Engine.__new__(Engine)
+        cloned._processes = self._processes
+        cloned._proc_map = self._proc_map
+        cloned._cs_cost = self._cs_cost
+        cloned._tick_us = self._tick_us
+
+        cloned._time = self._time
+        cloned._last_pid = self._last_pid
+        cloned._timeline = Timeline(segments=self._timeline.raw_segments)
+        cloned._context_switches = self._context_switches
+
+        cloned._remaining = self._remaining.copy()
+        cloned._waited = self._waited.copy()
+        cloned._first_start = self._first_start.copy()
+        cloned._completion = self._completion.copy()
+        cloned._last_run_end = self._last_run_end.copy()
+
+        cloned._admitted = self._admitted.copy()
+        cloned._ready_set = self._ready_set.copy()
+        cloned._completed = self._completed.copy()
+        cloned._current_view = self._current_view
+
+        cloned._ai_debt = self._ai_debt
+        cloned._ai_overhead_ticks = self._ai_overhead_ticks
+        cloned._decisions = self._decisions
+        cloned._inference_us_total = self._inference_us_total
+        cloned._start_cost_us = self._start_cost_us
+
+        return cloned
+
+    def restore(self, checkpoint: "Engine") -> None:
+        """
+        1. The use of function:
+           Restores the engine's execution state from a previously cloned Engine checkpoint.
+        2. How does the specific function work:
+           Validates checkpoint type. Overwrites mutable execution state, collections, timeline,
+           and overhead counters with fresh copies from the checkpoint instance.
+        3. Concepts used in the function:
+           State restoration, checkpoint/rollback pattern, rollout tree search.
+        4. Places where this function is imported and used:
+           Used by rollout oracle branches (Stage 13) to reset engine state without re-allocating.
+        5. Final output of the function, before and after:
+           Before: Engine at current or diverged execution state.
+           After: Engine state matches the checkpoint exactly.
+        """
+        if not isinstance(checkpoint, Engine):
+            raise TypeError(
+                f"checkpoint must be an Engine instance, got {type(checkpoint).__name__}."
+            )
+        self._processes = checkpoint._processes
+        self._proc_map = checkpoint._proc_map
+        self._cs_cost = checkpoint._cs_cost
+        self._tick_us = checkpoint._tick_us
+
+        self._time = checkpoint._time
+        self._last_pid = checkpoint._last_pid
+        self._timeline = Timeline(segments=checkpoint._timeline.raw_segments)
+        self._context_switches = checkpoint._context_switches
+
+        self._remaining = checkpoint._remaining.copy()
+        self._waited = checkpoint._waited.copy()
+        self._first_start = checkpoint._first_start.copy()
+        self._completion = checkpoint._completion.copy()
+        self._last_run_end = checkpoint._last_run_end.copy()
+
+        self._admitted = checkpoint._admitted.copy()
+        self._ready_set = checkpoint._ready_set.copy()
+        self._completed = checkpoint._completed.copy()
+        self._current_view = checkpoint._current_view
+
+        self._ai_debt = checkpoint._ai_debt
+        self._ai_overhead_ticks = checkpoint._ai_overhead_ticks
+        self._decisions = checkpoint._decisions
+        self._inference_us_total = checkpoint._inference_us_total
+        self._start_cost_us = checkpoint._start_cost_us
+
     def result(self) -> SimResult:
         """
         1. The use of function:
@@ -766,7 +1058,8 @@ class Engine:
         2. How does the specific function work:
            Verifies simulation is done. Computes ProcessMetrics for each workload process in
            original input order. Derives aggregate SimulationMetrics from process metrics and
-           timeline counters. Packages everything into an immutable SimResult.
+           timeline counters, passing AI overhead and effective metrics. Packages everything
+           into an immutable SimResult.
         3. Concepts used in the function:
            Result compilation, metric derivation, immutable reporting.
         4. Places where this function is imported and used:
@@ -787,12 +1080,23 @@ class Engine:
             for p in self._processes
         ]
 
+        avg_turnaround = (
+            sum(m.turnaround for m in proc_metrics) / len(proc_metrics)
+            if proc_metrics
+            else 0.0
+        )
+
         sim_metrics = calculate_simulation_metrics(
             proc_metrics=proc_metrics,
             makespan=self._timeline.makespan,
             busy_ticks=self._timeline.busy_ticks,
             overhead_ticks=self._timeline.overhead_ticks,
             context_switches=self._context_switches,
+            ai_overhead_ticks=self._ai_overhead_ticks,
+            decisions=self._decisions,
+            inference_us_total=self._inference_us_total,
+            effective_makespan=self._timeline.makespan,
+            effective_turnaround=avg_turnaround,
         )
 
         return SimResult(
@@ -806,29 +1110,37 @@ def run(
     policy: Any,
     processes: Sequence[Process],
     cs_cost: int = 0,
+    tick_us: float | None = None,
 ) -> SimResult:
     """
     1. The use of function:
-       Runs a complete CPU scheduling simulation using the provided policy and processes.
+       Runs a complete CPU scheduling simulation using the provided policy and processes,
+       incorporating optional AI model latency overhead accounting.
     2. How does the specific function work:
-       Instantiates Engine, resets to obtain initial View, and loops while not engine.done.
-       In each iteration, requests PID selection from policy (via .select(view) or __call__(view)),
-       steps the engine, and updates view. Finally returns engine.result().
+       Instantiates Engine with tick_us, resets to obtain initial View. Calls on_start() if
+       supported by policy to charge one-time upfront costs. Loops while not engine.done:
+       queries policy for next PID, queries decision_cost_us(view) if supported, steps engine,
+       and updates view. Finally returns compiled SimResult.
     3. Concepts used in the function:
-       Simulation runner, policy dispatch loop, deterministic execution.
+       Simulation runner, policy dispatch loop, AI latency hooks, deterministic execution.
     4. Places where this function is imported and used:
        Imported by benchmark scripts, test suites, ML/RL evaluation pipelines, and REST API.
     5. Final output of the function, before and after:
-       Before: Workload process definitions and scheduling policy specification.
+       Before: Workload process definitions, policy specification, and optional tick_us.
        After: Complete SimResult instance containing process metrics, aggregate metrics, timeline.
     """
-    engine = Engine(processes=processes, cs_cost=cs_cost)
+    engine = Engine(processes=processes, cs_cost=cs_cost, tick_us=tick_us)
     view = engine.reset()
 
     if hasattr(policy, "bind_workload") and callable(policy.bind_workload):
         policy.bind_workload(processes)
     elif hasattr(policy, "reset") and callable(policy.reset):
         policy.reset()
+
+    if hasattr(policy, "on_start") and callable(policy.on_start):
+        start_cost = float(policy.on_start(processes))
+        if start_cost > 0.0:
+            engine.charge_start_overhead(start_cost)
 
     while not engine.done:
         if hasattr(policy, "select") and callable(policy.select):
@@ -840,7 +1152,12 @@ def run(
                 f"Policy must provide a callable .select(view) method or be callable, "
                 f"got {type(policy).__name__}."
             )
-        step_info = engine.step(pid)
+
+        cost_us = 0.0
+        if hasattr(policy, "decision_cost_us") and callable(policy.decision_cost_us):
+            cost_us = float(policy.decision_cost_us(view))
+
+        step_info = engine.step(pid, decision_cost_us=cost_us)
         view = step_info.view
 
     return engine.result()

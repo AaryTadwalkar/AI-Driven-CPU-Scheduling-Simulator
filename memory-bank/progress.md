@@ -175,11 +175,141 @@
   - Created comprehensive `frontend/README.md` documenting architecture, setup instructions, backend synchronization, component breakdown, screenshot mapping, and Definition of Done verification.
   - Verified `npm test` runs 96 Vitest unit tests cleanly (2.35s), `npm run test:e2e` passes 20 Playwright tests (16.2s), and `npm run build` succeeds with strict TypeScript typechecking and minification (6.42s).
 
+- **Revised Implementation Plan — Stage 11 Complete:**
+  - Implemented AI stall timeline label (`AI`), fractional microsecond-to-tick debt accumulator, decision counts, and start overhead charging.
+  - Implemented `Engine.clone()` and `restore()`.
+  - Added benchmark `Setting(name, cs_cost)` in `config.py` (S0: cs_cost=0, S1: cs_cost=1).
+  - All 11 tests in `tests/test_stage11_engine.py` passing.
+
+- **Revised Implementation Plan — Stage 12 Complete (Category 1: Random Forest & Per-Setting Retraining):**
+  - Generated and validated `data/scheduling_dataset_S0.csv` and `data/scheduling_dataset_S1.csv` passing pilot gate (< 85% share per class).
+  - Implemented `src/schedsim/ml/train_forest.py` and trained Decision Tree and Random Forest for both S0 and S1 with 5-fold CV.
+  - Evaluated accuracy, macro-F1, and regret; verified that both DT and RF beat majority-class dummy baselines, and RF matches/beats DT on validation regret.
+  - Saved model artifacts (`decision_tree_S0.joblib`, `random_forest_S0.joblib`, `decision_tree_S1.joblib`, `random_forest_S1.joblib`, and synced `decision_tree.joblib` / `_meta.json`).
+  - Updated `recommend(processes, model, setting)` inference API in `src/schedsim/ml/evaluate_tree.py`.
+  - Implemented `SelectorPolicy(Policy)` in `src/schedsim/policies/selector.py` with `on_start()` upfront charging, `0.0` per-decision cost, `reset()`, and `DTPolicy`/`RFPolicy` subclasses.
+  - Registered `DT` and `RF` aliases in `src/schedsim/policies/registry.py`.
+  - Updated `RLPolicy` in `src/schedsim/rl/policy.py` with `from_setting()`, `from_cs_cost()`, `on_start()` auto-binding, and explicit `decision_cost_us()`.
+  - Added 9 unit/acceptance tests in `tests/test_stage12_category1.py`.
+  - Full suite passing: 396 passed, 0 ruff errors.
+
+- **Revised Implementation Plan — Stage 13 Complete (Rollout Oracle - labels only):**
+  - Added PID selector & oracle constants to `config.py` (`ORACLE_BASE_POLICIES`, `PID_BC_TRAIN_WORKLOADS`, `DAGGER_ITERS`, `DAGGER_WORKLOADS_PER_ITER`, `PID_MAX_STATES`, `GBDT_PARAMS`, `NN_HIDDEN`, `NN_SEEDS`).
+  - Created package `schedsim.pidsel` (`__init__.py`, `oracle.py`).
+  - Implemented `OracleDecision` and `OracleStepRecord` frozen dataclasses with strict invariant checking.
+  - Implemented `evaluate_state(engine, base_policies)` using `Engine.clone()`, 1-step lookahead, and base rollout simulation with 4-tier tie-breaking: `(cost, remaining, arrival, pid)`.
+  - Implemented `run_oracle(processes, cs_cost, base_policies)` with forced decision skipping and non-forced trajectory recording.
+  - Implemented `RolloutOraclePolicy(Policy)` supporting shadow engine synchronization inside `run()`.
+  - Implemented `label_workloads_parallel` with multiprocessing `ProcessPoolExecutor` and deterministic sequence ordering.
+  - Added 10 tests in `tests/test_stage13_oracle.py`:
+    - S0 acceptance: Oracle waiting matches SRTF exactly across 300 random workloads (0 violations).
+    - S1 acceptance: Oracle waiting bounded by `min(SRTF, SJF)` across 300 random workloads (0 violations, 16 strict improvements, 284 ties).
+    - Determinism verified on repeated runs.
+    - Tie-breaking rules verified across cost, remaining burst, arrival, and PID.
+    - Regret properties verified (best candidate regret 0, suboptimal > 0, algebraic identity).
+    - Full suite passing: 406 passed, 0 ruff errors.
+
+- **Revised Implementation Plan — Stage 14 Complete (Per-Candidate Features and Training Data):**
+  - Implemented 13 per-candidate features in `src/schedsim/pidsel/features.py`: Process group (`rem`, `burst`, `rem_burst_ratio`, `waited`, `is_last`), Relative group (`rank_rem`, `rank_waited`, `rem_min_ratio`, `rem_mean_ratio`), and Context group (`n_ready`, `sum_rem`, `cs_cost`, `pending_arrivals`).
+  - Implemented pure NumPy symmetric fractional rank `compute_normalized_rank`.
+  - Implemented `extract_candidate_features` and `pad_and_stack_features` producing permutation-equivariant float32 tensors with no PIDs or lookahead.
+  - Implemented `build_pid_dataset` in `src/schedsim/pidsel/dataset.py` running the rollout oracle, filtering forced decisions (`len(ready) <= 1`), and capturing features, masks, costs, regrets, and best candidate index.
+  - Generated and saved `data/pid_bc_S0.npz` and `data/pid_bc_S1.npz` (100,000 states each, 2,467 and 2,420 workloads).
+  - Implemented `generate_dataset_report` and produced `results/pid_dataset_report.md` documenting:
+    - Min ready candidates = 2 across both datasets (zero single-candidate states).
+    - S0 oracle behavior: 100.00% SRTF alignment, 0.0% continuation-only.
+    - S1 oracle behavior: 99.01% SRTF alignment, 0.99% continuation-only (987 states where preemption switch stall was avoided).
+  - Added `pending_arrivals` to `View` and `Engine._build_view` with 100% backward compatibility.
+  - Integrated `build-pid-data` CLI subcommand into `cli.py`.
+  - Added 12 comprehensive unit and integration tests in `tests/test_stage14_pidsel_data.py`.
+  - Full suite passing: 418 passed, 0 ruff errors, 0 lines > 100 chars.
+
+- **Revised Implementation Plan — Stage 15 Complete (Model 4: Gradient-Boosted Candidate Ranker):**
+  - Implemented `src/schedsim/pidsel/gbdt_ranker.py`:
+    - `export_tree_ensemble`: Flat array extraction (`l`, `r`, `f`, `th`, `v`), `lr`, and `init_val` from scikit-learn `GradientBoostingClassifier`.
+    - `score_candidates`: Vectorized branchless candidate scoring using pure NumPy.
+    - `prepare_training_data`: Slices NPZ dataset into candidate rows with regret-weighted sample weights and binary optimal labels (cost <= best_cost * 1.01).
+    - `train_gbdt`: Trains `GradientBoostingClassifier` with `GBDT_PARAMS` on S0/S1 datasets, exports `models/pid_gbdt_<S>.joblib` and `models/pid_gbdt_<S>_meta.json`.
+    - `evaluate_gbdt_on_validation`: Evaluates 500 validation workloads, producing `results/pid_gbdt_val.json`:
+      - S0: Top-1 agreement 99.39%, Mean J_policy 14.727, Mean J_oracle 14.656, Gap vs Oracle/SRTF = +0.486% (<= 0.02 threshold met).
+      - S1: Top-1 agreement 99.81%, Mean J_policy 18.008, Mean J_oracle 17.983, Mean J_srtf 18.148, Gap vs Oracle = +0.139%, Gap vs SRTF = -0.771%.
+    - `GBDTRankerPolicy(Policy)`: Fast inference with 4-tier tie-breaking (highest score -> smaller remaining -> earlier arrival -> pid string).
+  - Centralized policy registry integration in `src/schedsim/policies/registry.py`: `PID_GBDT` and `GBDT` aliases registered.
+  - Package exports in `src/schedsim/pidsel/__init__.py`.
+  - Added CLI subcommand `train-pid-gbdt` to `cli.py` supporting `--setting`, `--data-dir`, `--models-dir`, `--val-eval`.
+  - Created 11 comprehensive unit and acceptance tests in `tests/test_stage15_gbdt.py`.
+  - Full suite passing: 429 passed, 0 ruff errors, 0 lines > 100 chars.
+
+- **Revised Implementation Plan — Stage 16 Complete (Model 5: Neural Candidate Scorer):**
+  - Implemented `src/schedsim/pidsel/scorer_net.py`:
+    - `Scorer(nn.Module)`: Permutation-equivariant candidate-scoring neural network architecture (~3.6k parameters). Applies candidate-wise MLP phi (13 -> 32 -> 32), mean-pools across valid candidates for context aggregation, and maps concatenated features [z, ctx] through scoring head (64 -> 32 -> 1). Masked candidates filled with -inf.
+    - `export_numpy_weights`: Extracts all layer weights and biases into pure-NumPy float32 arrays.
+    - `numpy_score`: Vectorized pure-NumPy forward pass matching PyTorch within 1.7e-8.
+    - `NeuralCandidatePolicy(Policy)`: Fast inference adapter executing without PyTorch dependencies. Canonical 4-tier tie breaking: score desc -> remaining asc -> arrival asc -> pid asc.
+  - Implemented `src/schedsim/pidsel/train_bc.py`:
+    - `soft_cross_entropy_loss`: Soft target distribution p*(a) ∝ exp(-regret_a / T) over valid candidates with numerically stable masked log-softmax.
+    - `train_neural_scorer`: Iterative DAgger training loop (DAGGER_ITERS = 2) across NN_SEEDS = [0, 1, 2]. Iteration 0 trains on oracle trajectories; subsequent iterations roll out current model on fresh train workloads mixing oracle actions with probability beta = 0.5^i, query evaluate_state, append transitions, and retrain warm-start.
+    - Multi-seed validation evaluation on 200 fixed validation workloads:
+      - S0: Top-1 agreement 100.0%, Mean J_policy 14.4624, Gap vs Oracle/SRTF = 0.000% (<= 0.02 threshold met).
+      - S1: Top-1 agreement 99.90%, Mean J_policy 17.8104 +/- 0.0002, Gap vs Oracle = +0.098%, Gap vs SRTF = -0.824%.
+    - Persisted `models/pid_scorer_S0_np.npz`, `pid_scorer_S0_meta.json`, `models/pid_scorer_S1_np.npz`, `pid_scorer_S1_meta.json`, and `results/pid_m2_val.csv`.
+  - Registered `PID_NN` and `PID_NEURAL` aliases in `src/schedsim/policies/registry.py`.
+  - Exported Stage 16 components in `src/schedsim/pidsel/__init__.py`.
+  - Added CLI subcommand `train-pid-nn` to `cli.py` supporting all Stage 16 flags.
+  - Created 16 comprehensive unit and acceptance tests in `tests/test_stage16_neural.py`.
+  - Full suite passing: 445 passed, 0 ruff errors, 0 lines > 100 chars.
+
+- **Revised Implementation Plan — Stage 17 Complete (Latency profile and cost model):**
+  - Implemented `src/schedsim/overhead.py`:
+    - Enforced single-threaded execution controls (`OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `torch.set_num_threads(1)`).
+    - `benchmark_policy_latencies`: Measures median of medians and p95 across 3 repeats with GC disabled over synthetic `View` states for FCFS, SJF, RR, SRTF, Q-learning, GBDT, and Neural across $n_{\text{ready}} \in \{2, 3, 5, 8, 10\}$.
+    - `benchmark_startup_latencies`: Measures upfront feature extraction + tree prediction latency across workload sizes (3, 5, 8, 10, 15, 20) for Category 1 Decision Tree and Random Forest.
+    - `save_latency_profile` & `load_latency_profile`: JSON persistence with in-memory caching (`_CACHED_PROFILE`).
+    - `get_interpolated_cost_us` & `get_startup_cost_us`: 1D linear interpolation with boundary clamping and extrapolation warnings.
+    - `plot_latency_profile`: Generates publication-quality figure (`results/figures/latency_vs_ready.png`).
+    - `validate_live_vs_table`: Simulates workload with transparent `_LiveTimingProxy`, comparing live vs table totals.
+  - Policy Life-Cycle Hook Connections:
+    - Connected `decision_cost_us(view)` across `FCFSPolicy`, `SJFPolicy`, `SRTFPolicy`, `RoundRobinPolicy`, `RLPolicy`, `GBDTRankerPolicy`, and `NeuralCandidatePolicy`.
+    - Exempted forced decisions (`len(view.ready) <= 1`) and `view is None` (returns 0.0 µs).
+    - Connected `on_start(processes)` in `SelectorPolicy` (`DTPolicy`, `RFPolicy`) returning upfront latency.
+  - CLI Integration:
+    - Added `bench-latency` subcommand to `cli.py` with tabular reporting and plot generation.
+    - Generated `models/latency_profile.json` and `results/figures/latency_vs_ready.png`.
+  - Tests:
+    - Created `tests/test_stage17_overhead.py` with 13 comprehensive unit, property, and CLI tests.
+    - Full suite passing: 458 passed (100%), `ruff check .` clean (0 errors), 0 lines > 100 chars.
+
+- **Revised Implementation Plan — Stage 18 Complete (Final Comparison — The Deliverable):**
+  - Implemented `src/schedsim/evaluation/final_comparison.py`:
+    - Evaluated run matrix across S0 ($c_s = 0$) and S1 ($c_s = 1$) on 1,000 test split workloads (seeds 200,000–200,999).
+    - Evaluated 11 policies: Classical (`FCFS`, `SJF`, `RR` q=2, `SRTF`), AI Category 1 (`DT`, `RF`), AI Category 2 (`Q-learning`), AI Category 3 (`PID_GBDT`, `PID_NN`), and References (`Best-Classical-Hindsight`, `Oracle`).
+    - Verified S0 optimality sanity check (no policy beats SRTF before overhead at $c_s = 0$).
+    - Computed 15-column comparison matrices with 95% bootstrap CIs (1,000 resamples).
+    - Exported deliverables: `results/final_comparison_S0.csv`, `results/final_comparison_S0.md`, `results/final_comparison_S1.csv`, `results/final_comparison_S1.md`.
+    - Computed 1D linear break-even tick frequencies across sweep $[1, 10, 100, 1000, 10000]\,\mu\text{s}$.
+    - Generated 5 publication-quality figures at 300 DPI in `results/figures/`:
+      1. `effective_cost_vs_tick.png`
+      2. `gap_to_oracle_bars.png`
+      3. `overhead_breakdown.png`
+      4. `final_scenario_heatmap.png`
+      5. `gantt_with_ai_stalls.png`
+    - Evaluated pre-registered hypotheses H1–H4 in `docs/HYPOTHESES_RESULTS.md` with formal verdicts:
+      * H1: CONFIRMED (SRTF optimal at S0; learned models degrade after overhead).
+      * H2: CONFIRMED (Oracle beats SRTF at S1: 17.76 vs 17.90; Neural 17.77 and GBDT 17.78 capture gap).
+      * H3: CONFIRMED (Break-even tick thresholds calculated: Q-learning 1 µs, Neural 100 µs, GBDT 10,000 µs).
+      * H4: REFUTED (Random Forest 100-tree ensemble latency 31,193 µs imposes 38.06% makespan overhead, refuting < 0.1%).
+  - CLI Integration:
+    - Added `compare-all` subcommand to `cli.py` (`python cli.py compare-all`).
+  - Tests:
+    - Created `tests/test_stage18_comparison.py` with 11 acceptance tests (100% pass in 22.8s).
+    - Full test suite passing: 469 passed (100% in 363.2s), 0 failures.
+    - Zero ruff errors (`ruff check .` clean), 0 lines > 100 chars.
+
 ## What's Left to Build
-- **Stage 10: Final Documentation & Report Generation:**
-  - Technical Report (PDF / LaTeX) integrating the 14 captured screenshots, benchmark findings, and system evaluation.
+- **Stage 19:** Minimal API and dashboard extension (`/simulate`, `/compare`, AI stall visualization).
+- **Stage 20:** Submission pack (`README.md`, `docs/REPORT_NOTES.md`, `make smoke`).
 
 ## Current Status
-- Stages 0 to 8 complete and verified (376 pytest tests passing, 0 ruff errors).
-- Stage 9 Complete: All Sub-stages (F1, F2, F3, F4, F5, F6) complete and verified (96 passing frontend tests, 20 passing Playwright E2E tests, clean production build, 14 verified screenshots).
-- Next up: Stage 10 (Final Report & Documentation).
+- Stages 0 to 9 complete.
+- Stages 11, 12, 13, 14, 15, 16, 17, and 18 complete and verified (469 pytest tests passing, 0 ruff errors, 0 lines > 100 chars).
+- Next up: Stage 19 (Minimal API and dashboard extension).

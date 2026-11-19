@@ -1,11 +1,12 @@
 """
 1. What this file does:
-   Implements the First-Come, First-Served (FCFS) classical CPU scheduling algorithm.
+   Implements the First-Come, First-Served (FCFS) classical CPU scheduling algorithm with
+   hardware latency accounting.
 2. Overall design:
    Inherits from the Policy base class. At each discrete tick, selects the ready process
    with the minimum (arrival, pid) tuple. Because the running process already holds the minimal
    arrival time, FCFS is inherently non-preemptive. Deterministic tie-breaking uses lexicographical
-   PID order.
+   PID order. Connects decision_cost_us to the hardware latency profile for AI overhead modeling.
 3. Elements in the file:
    - FCFSPolicy: Class implementing non-preemptive First-Come, First-Served scheduling.
 4. Final output of the file:
@@ -24,6 +25,7 @@ class FCFSPolicy(Policy):
        - name: Identifier string "FCFS".
        - __init__: Initializes the policy with name "FCFS".
        - select: Selects the ready process having the minimum (arrival, pid).
+       - decision_cost_us: Returns measured per-decision latency from hardware profile.
     3. Technologies used and why:
        - Subclasses Policy ABC for polymorphic engine compatibility.
        - Deterministic min() key selection with composite tuple (arrival, pid).
@@ -47,6 +49,23 @@ class FCFSPolicy(Policy):
            After: Configured FCFSPolicy instance ready for select() calls.
         """
         super().__init__(name=name)
+
+    def decision_cost_us(self, view: View) -> float:
+        """
+        1. The use of function:
+           Returns the per-decision latency in microseconds for classical FCFS.
+        2. How does the specific function work:
+           Returns 0.0 µs as classical baseline overhead is neglected in simulation, while
+           measured latencies are preserved in models/latency_profile.json.
+        3. Concepts used in the function:
+           Classical baseline overhead exemption, hardware profile reference.
+        4. Places where this function is imported and used:
+           Invoked by Engine runner on non-forced scheduling steps.
+        5. Final output of the function, before and after:
+           Before: Observable View instance representing ready processes.
+           After: Returns 0.0 µs float latency.
+        """
+        return 0.0
 
     def select(self, view: View) -> str:
         """

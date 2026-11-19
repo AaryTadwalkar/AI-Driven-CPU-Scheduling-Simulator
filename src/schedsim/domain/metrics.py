@@ -113,7 +113,8 @@ class ProcessMetrics:
 class SimulationMetrics:
     """
     1. The use of class:
-       Encapsulates system-level aggregate scheduling metrics for an entire simulation run.
+       Encapsulates system-level aggregate scheduling metrics for an entire simulation run,
+       incorporating AI model inference stalls and effective throughput measures.
     2. What the class contains:
        - avg_waiting: Mean waiting time across all finished processes.
        - avg_turnaround: Mean turnaround time across all finished processes.
@@ -125,13 +126,18 @@ class SimulationMetrics:
        - throughput: Completed processes per unit simulation time (n / makespan).
        - context_switches: Total count of process preemptions and context dispatches.
        - jain_fairness: Jain's fairness index computed over per-process slowdowns (T / B).
-       - __post_init__: Integrity validator checking types and non-negative boundaries.
+       - ai_overhead_ticks: Total ticks consumed by AI inference stalls ('AI').
+       - decisions: Total count of non-forced scheduling decisions made.
+       - inference_us_total: Total raw model inference latency accumulated in microseconds.
+       - effective_makespan: Total makespan including AI stall overhead ticks.
+       - effective_turnaround: Average turnaround time including AI stall delays.
+       - __post_init__: Integrity validator checking types, defaults, and non-negative boundaries.
     3. Technologies used and why:
        - Frozen dataclass for immutability, thread-safety, and clean equality comparisons.
        - Automatic float conversion of numerical attributes for robust interoperability.
     4. Key design and overall design of the class:
        Serves as the primary evaluation entity summarizing simulation performance, utilized
-       for comparing classical policies and benchmarking RL agents.
+       for comparing classical policies, benchmarking RL agents, and overhead break-even analysis.
     """
 
     avg_waiting: float
@@ -144,22 +150,27 @@ class SimulationMetrics:
     throughput: float
     context_switches: int
     jain_fairness: float
+    ai_overhead_ticks: int = 0
+    decisions: int = 0
+    inference_us_total: float = 0.0
+    effective_makespan: int = 0
+    effective_turnaround: float = 0.0
 
     def __post_init__(self) -> None:
         """
         1. The use of function:
-           Validates metric types and numerical ranges upon instantiation.
+           Validates metric types, non-negativity, and defaults upon instantiation.
         2. How does the specific function work:
            Ensures float metrics are valid non-boolean numerical values (coercing int to float if
-           needed), verifies int metrics are non-negative, and checks that jain_fairness is
-           within [0.0, 1.0].
+           needed), verifies int metrics are non-negative, sets effective_makespan to makespan if 0,
+           sets effective_turnaround to avg_turnaround if 0.0, and checks jain_fairness bounds.
         3. Concepts used in the function:
            Dataclass post-init hook, numerical bounds checking, dynamic attribute coercion.
         4. Places where this function is imported and used:
            Invoked automatically during SimulationMetrics instantiation.
         5. Final output of the function, before and after:
            Before: Unverified raw metric inputs.
-           After: Verified immutable instance or raises TypeError / ValueError on violation.
+           After: Verified immutable instance with initialized effective metrics.
         """
         float_fields = (
             "avg_waiting",
@@ -168,6 +179,8 @@ class SimulationMetrics:
             "cpu_utilization",
             "throughput",
             "jain_fairness",
+            "inference_us_total",
+            "effective_turnaround",
         )
         for name in float_fields:
             val = getattr(self, name)
@@ -183,6 +196,9 @@ class SimulationMetrics:
             "makespan": self.makespan,
             "overhead_ticks": self.overhead_ticks,
             "context_switches": self.context_switches,
+            "ai_overhead_ticks": self.ai_overhead_ticks,
+            "decisions": self.decisions,
+            "effective_makespan": self.effective_makespan,
         }
         for name, ival in int_fields.items():
             if isinstance(ival, bool) or not isinstance(ival, int):
@@ -196,6 +212,11 @@ class SimulationMetrics:
             fval = getattr(self, name)
             if fval < 0.0:
                 raise ValueError(f"SimulationMetrics {name} must be >= 0.0, got {fval}.")
+
+        if self.effective_makespan == 0:
+            object.__setattr__(self, "effective_makespan", self.makespan)
+        if self.effective_turnaround == 0.0:
+            object.__setattr__(self, "effective_turnaround", self.avg_turnaround)
 
         if self.jain_fairness > 1.0 + 1e-9:
             raise ValueError(
@@ -317,20 +338,24 @@ def calculate_simulation_metrics(
     busy_ticks: int,
     overhead_ticks: int,
     context_switches: int,
+    ai_overhead_ticks: int = 0,
+    decisions: int = 0,
+    inference_us_total: float = 0.0,
+    effective_makespan: int | None = None,
+    effective_turnaround: float | None = None,
 ) -> SimulationMetrics:
     """
     1. The use of function:
-       Computes aggregate simulation performance metrics across all completed processes and
-       engine execution counters.
+       Computes aggregate simulation performance metrics across all completed processes,
+       engine execution counters, and AI overhead measurements.
     2. How does the specific function work:
-       Validates input collections and non-negative counters. Computes average waiting time,
-       average turnaround time, average response time, maximum waiting time, CPU utilization
-       (busy_ticks / makespan), throughput (n / makespan), and Jain's fairness index over
-       process slowdowns (turnaround / burst). Guards against division by zero when makespan
-       or process count is zero.
+       Validates input collections, counters, and optional AI overhead metrics. Computes
+       average waiting, turnaround, response, maximum waiting, CPU utilization, throughput,
+       and Jain's fairness index over process slowdowns. Populates effective makespan and
+       effective turnaround defaults, returning an immutable SimulationMetrics instance.
     3. Concepts used in the function:
        Aggregate performance evaluation, CPU utilization fraction, system throughput,
-       Jain's fairness index, defensive zero-division avoidance.
+       Jain's fairness index, AI stall accounting, defensive validation.
     4. Places where this function is imported and used:
        Imported by Engine.result(), simulation experiment runners, RL evaluation wrappers,
        and unit tests.
@@ -355,12 +380,48 @@ def calculate_simulation_metrics(
         "busy_ticks": busy_ticks,
         "overhead_ticks": overhead_ticks,
         "context_switches": context_switches,
+        "ai_overhead_ticks": ai_overhead_ticks,
+        "decisions": decisions,
     }
     for name, cval in counters.items():
         if isinstance(cval, bool) or not isinstance(cval, int):
             raise TypeError(f"{name} must be an int, got {type(cval).__name__}.")
         if cval < 0:
             raise ValueError(f"{name} cannot be negative, got {cval}.")
+
+    if isinstance(inference_us_total, bool) or not isinstance(
+        inference_us_total, (int, float)
+    ):
+        raise TypeError(
+            f"inference_us_total must be numeric, got {type(inference_us_total).__name__}."
+        )
+    if inference_us_total < 0:
+        raise ValueError(
+            f"inference_us_total cannot be negative, got {inference_us_total}."
+        )
+
+    if effective_makespan is not None:
+        if isinstance(effective_makespan, bool) or not isinstance(effective_makespan, int):
+            raise TypeError(
+                f"effective_makespan must be an int, got {type(effective_makespan).__name__}."
+            )
+        if effective_makespan < 0:
+            raise ValueError(
+                f"effective_makespan cannot be negative, got {effective_makespan}."
+            )
+
+    if effective_turnaround is not None:
+        if isinstance(effective_turnaround, bool) or not isinstance(
+            effective_turnaround, (int, float)
+        ):
+            raise TypeError(
+                f"effective_turnaround must be numeric, got "
+                f"{type(effective_turnaround).__name__}."
+            )
+        if effective_turnaround < 0:
+            raise ValueError(
+                f"effective_turnaround cannot be negative, got {effective_turnaround}."
+            )
 
     n = len(proc_metrics)
     if n > 0:
@@ -380,6 +441,11 @@ def calculate_simulation_metrics(
     cpu_utilization = float(busy_ticks / makespan) if makespan > 0 else 0.0
     throughput = float(n / makespan) if makespan > 0 else 0.0
 
+    eff_makespan = makespan if effective_makespan is None else effective_makespan
+    eff_turnaround = (
+        avg_turnaround if effective_turnaround is None else float(effective_turnaround)
+    )
+
     return SimulationMetrics(
         avg_waiting=avg_waiting,
         avg_turnaround=avg_turnaround,
@@ -391,4 +457,9 @@ def calculate_simulation_metrics(
         throughput=throughput,
         context_switches=context_switches,
         jain_fairness=jain_fairness,
+        ai_overhead_ticks=ai_overhead_ticks,
+        decisions=decisions,
+        inference_us_total=float(inference_us_total),
+        effective_makespan=eff_makespan,
+        effective_turnaround=eff_turnaround,
     )

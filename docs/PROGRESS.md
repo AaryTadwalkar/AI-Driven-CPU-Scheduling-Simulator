@@ -158,6 +158,49 @@ Project: AI-Driven CPU Scheduling Simulator
   - Added comprehensive test suites in `src/test/ai-lab.test.tsx` (9 tests) and `src/test/results.test.tsx` (8 tests). All 9 test files (96 tests) pass cleanly.
   - Production build clean (`npm run build` succeeds in 6.76s with 0 errors).
 
+---
+
+## Stage 15: Model 4 — Gradient-Boosted Candidate Ranker
+- **Date**: 2026-11-19
+- **Tasks Completed**:
+  - `schedsim/pidsel/gbdt_ranker.py`: Implemented tree ensemble export (`export_tree_ensemble`),
+    pure-NumPy vectorized branchless tree traversal (`score_candidates`), training data preparation
+    (`prepare_training_data`), model training (`train_gbdt`), validation evaluation
+    (`evaluate_gbdt_on_validation`), and Policy adapter `GBDTRankerPolicy`.
+  - `schedsim/policies/registry.py`: Registered `PID_GBDT` and `GBDT` aliases.
+  - `schedsim/pidsel/__init__.py`: Exported Stage 15 components.
+  - `cli.py`: Integrated `train-pid-gbdt` subcommand with `--setting`, `--data-dir`, etc.
+  - `tests/test_stage15_gbdt.py`: 11 comprehensive unit and acceptance tests.
+- **Verification**:
+  - S0 validation: Top-1 agreement 99.39%, closed-loop gap vs SRTF = +0.486% (<= 0.02 threshold met).
+  - S1 validation: Top-1 agreement 99.81%, gap vs Oracle = +0.139%, gap vs SRTF = -0.771%.
+  - Pytest: 429 tests passing across repository.
+  - Ruff check: 0 errors; line length scan: 0 lines > 100 chars.
+
+---
+
+## Stage 16: Model 5 — Neural Candidate Scorer (Deep Learning)
+- **Date**: 2026-11-19
+- **Tasks Completed**:
+  - `schedsim/pidsel/scorer_net.py`: Implemented PyTorch `Scorer` (~3.6k parameters, phi + head),
+    pure-NumPy weight extraction (`export_numpy_weights`), vectorized pure-NumPy candidate scoring
+    (`numpy_score`), and Policy adapter `NeuralCandidatePolicy`.
+  - `schedsim/pidsel/train_bc.py`: Implemented `soft_cross_entropy_loss` with masked Boltzmann
+    target probabilities, parallel DAgger state harvesting (`_collect_dagger_states`), iterative
+    retraining loop (`train_neural_scorer`), and validation evaluator
+    (`evaluate_neural_on_validation`).
+  - `schedsim/policies/registry.py`: Registered `PID_NN` and `PID_NEURAL` aliases.
+  - `schedsim/pidsel/__init__.py`: Exported Stage 16 components.
+  - `cli.py`: Integrated `train-pid-nn` subcommand with `--setting`, `--dagger-iters`, `--epochs`,
+    `--lr`, `--max-states`, `--n-val-workloads`.
+  - `tests/test_stage16_neural.py`: 16 comprehensive unit and acceptance tests.
+- **Verification**:
+  - PyTorch vs NumPy forward pass numerical equivalence: max difference < 1.7e-8 (target < 1e-5).
+  - S0 validation: Top-1 agreement 100.0%, closed-loop gap vs SRTF = 0.000% (target <= 0.02).
+  - S1 validation: Top-1 agreement 99.90%, gap vs Oracle = +0.098%, gap vs SRTF = -0.824%.
+  - Pytest: 445 tests passing (100% of test suite).
+  - Ruff check: 0 errors; line length scan: 0 lines > 100 chars.
+
 
 
 

@@ -293,7 +293,11 @@ class TestSplitErrorHandling:
             generate_split_workloads(split="val", n_workloads=True)  # type: ignore[arg-type]
 
         with pytest.raises(TypeError, match="seed_offset must be an int"):
-            generate_split_workloads(split="val", n_workloads=5, seed_offset="0")  # type: ignore[arg-type]
+            generate_split_workloads(
+                split="val", n_workloads=5, seed_offset="0"
+            )  # type: ignore[arg-type]
 
         with pytest.raises(TypeError, match="default_n_processes must be an int"):
-            generate_split_workloads(split="val", n_workloads=5, default_n_processes=3.5)  # type: ignore[arg-type]
+            generate_split_workloads(
+                split="val", n_workloads=5, default_n_processes=3.5
+            )  # type: ignore[arg-type]

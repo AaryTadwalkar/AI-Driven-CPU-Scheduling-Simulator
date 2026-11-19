@@ -1,18 +1,22 @@
 """
 1. What this file does:
-   Implements the centralized policy registry and factory for CPU scheduling policies.
+   Implements the centralized policy registry and factory for CPU scheduling policies, including
+   registration of Category 1 SelectorPolicy aliases ('DT' and 'RF').
 2. Overall design:
-   Maintains a registry mapping case-insensitive policy names and aliases to their respective
-   Policy subclass implementations. Provides factory instantiation with kwargs forwarding,
-   dynamic policy registration, canonical policy listing, and descriptive error handling.
+   Maintains a primary registry mapping case-insensitive policy names to Policy subclasses and an
+   alias table supporting parameterized factory resolution for Category 1 ML selectors. Provides
+   factory instantiation with kwargs forwarding, dynamic policy registration, canonical policy
+   listing, and descriptive error handling.
 3. Elements in the file:
-   - _REGISTRY: Private dictionary storing normalized lookup keys and (canonical_name, policy_cls).
-   - register_policy: Function to register a Policy subclass under a given name.
-   - get_policy: Factory function to retrieve and instantiate a Policy instance by name.
-   - list_policies: Function returning sorted unique canonical policy names.
-   - _reset_registry: Helper function restoring default classical policy registrations.
+   - _REGISTRY: Dictionary storing primary canonical policy classes.
+   - _ALIASES: Dictionary storing parameterized alias mappings.
+   - register_policy: Registers a Policy subclass under a given name.
+   - register_alias: Registers a parameterized alias pointing to a Policy subclass.
+   - get_policy: Factory function retrieving and instantiating a policy or alias by name.
+   - list_policies: Returns sorted unique canonical policy names.
+   - _reset_registry: Helper function restoring baseline classical policies and default aliases.
 4. Final output of the file:
-   Exports get_policy, list_policies, and register_policy for CLI, runner, and simulation modules.
+   Exports get_policy, list_policies, register_policy, and register_alias for simulations.
 """
 
 from typing import Any
@@ -24,6 +28,7 @@ from schedsim.policies.sjf import SJFPolicy
 from schedsim.policies.srtf import SRTFPolicy
 
 _REGISTRY: dict[str, tuple[str, type[Policy]]] = {}
+_ALIASES: dict[str, tuple[str, type[Policy], dict[str, Any]]] = {}
 
 
 def register_policy(name: str, policy_cls: type[Policy]) -> None:
@@ -54,19 +59,45 @@ def register_policy(name: str, policy_cls: type[Policy]) -> None:
     _REGISTRY[stripped.lower()] = (stripped, policy_cls)
 
 
+def register_alias(name: str, policy_cls: type[Policy], **default_kwargs: Any) -> None:
+    """
+    1. The use of function:
+       Registers a parameterized policy alias in the registry.
+    2. How does the specific function work:
+       Validates name and policy_cls, normalizes name to lowercase, and stores a tuple of
+       (canonical_name, policy_cls, default_kwargs) in _ALIASES.
+    3. Concepts used in the function:
+       Alias mapping, factory parameter preset, case-insensitive indexing.
+    4. Places where this function is imported and used:
+       Used to register DT and RF aliases pointing to SelectorPolicy.
+    5. Final output of the function, before and after:
+       Before: _ALIASES without the specified mapping.
+       After: _ALIASES updated with the registered alias mapping.
+    """
+    if not isinstance(name, str):
+        raise TypeError(f"Policy alias name must be a str, got {type(name).__name__}")
+    stripped = name.strip()
+    if not stripped:
+        raise ValueError("Policy alias name cannot be empty")
+    if not isinstance(policy_cls, type) or not issubclass(policy_cls, Policy):
+        raise TypeError("policy_cls must be a subclass of Policy")
+
+    _ALIASES[stripped.lower()] = (stripped, policy_cls, default_kwargs)
+
+
 def get_policy(name: str, /, **kwargs: Any) -> Policy:
     """
     1. The use of function:
        Retrieves and instantiates a registered scheduling policy by name with optional kwargs.
     2. How does the specific function work:
-       Validates that name is a string. Normalizes the name to lowercase stripped format and looks
-       it up in the registry. If not found, raises a KeyError listing all currently available
-       policies. If found, instantiates and returns the corresponding Policy class with kwargs.
+       Validates that name is a string. Normalizes the name to lowercase stripped format.
+       Checks _REGISTRY first; if present, instantiates policy_cls with kwargs.
+       Next checks _ALIASES; if present, merges default kwargs with user kwargs and instantiates.
+       If not found in either, raises KeyError with available policies.
     3. Concepts used in the function:
-       Factory pattern, case-insensitive string matching, error diagnostic formatting, kwargs,
-       positional-only parameter syntax.
+       Factory pattern, alias resolution, case-insensitive string matching, kwargs merging.
     4. Places where this function is imported and used:
-       Exported in schedsim.policies, used by the CLI simulation subcommand, benchmark runners,
+       Exported in schedsim.policies, used by CLI simulation subcommand, benchmark runners,
        API endpoints, and unit test suites.
     5. Final output of the function, before and after:
        Before: Policy name string and optional constructor keyword arguments.
@@ -76,31 +107,55 @@ def get_policy(name: str, /, **kwargs: Any) -> Policy:
         raise TypeError(f"Policy name must be a str, got {type(name).__name__}")
     stripped = name.strip()
     key = stripped.lower()
-    if not key or key not in _REGISTRY:
-        avail = ", ".join(list_policies())
-        raise KeyError(f"Unknown policy '{name}'. Available policies: {avail}")
+    if key in _REGISTRY:
+        _, policy_cls = _REGISTRY[key]
+        return policy_cls(**kwargs)
 
-    _, policy_cls = _REGISTRY[key]
-    return policy_cls(**kwargs)
+    if key in _ALIASES:
+        _, policy_cls, def_kwargs = _ALIASES[key]
+        merged = {**def_kwargs, **kwargs}
+        return policy_cls(**merged)
+
+    if key in ("dt", "rf", "selectorpolicy"):
+        from schedsim.policies.selector import SelectorPolicy
+        if key == "dt":
+            return SelectorPolicy(model="dt", **kwargs)
+        if key == "rf":
+            return SelectorPolicy(model="rf", **kwargs)
+        return SelectorPolicy(**kwargs)
+
+    if key in ("pid_gbdt", "gbdt", "gbdtrankerpolicy"):
+        from schedsim.pidsel.gbdt_ranker import GBDTRankerPolicy
+        return GBDTRankerPolicy(**kwargs)
+
+    if key in ("pid_nn", "pid_neural", "neuralcandidatepolicy"):
+        from schedsim.pidsel.scorer_net import NeuralCandidatePolicy
+        return NeuralCandidatePolicy(**kwargs)
+
+    avail = ", ".join(list_policies(include_aliases=True))
+    raise KeyError(f"Unknown policy '{name}'. Available policies: {avail}")
 
 
-def list_policies() -> list[str]:
+def list_policies(include_aliases: bool = False) -> list[str]:
     """
     1. The use of function:
-       Returns a sorted list of unique canonical names of all registered scheduling policies.
+       Returns a sorted list of unique canonical names of registered scheduling policies.
     2. How does the specific function work:
-       Iterates over the registered entries, extracts canonical names, deduplicates them, and
-       returns them sorted lexicographically.
+       Iterates over the registered entries, extracts canonical names, deduplicates them,
+       optionally includes registered aliases if include_aliases is True, and returns them sorted.
     3. Concepts used in the function:
        Registry introspection, lexicographical sorting, collection deduplication.
     4. Places where this function is imported and used:
        Exported in schedsim.policies, used by CLI choices, diagnostic error messages in
        get_policy, and unit test suites.
     5. Final output of the function, before and after:
-       Before: Current internal registry mappings.
+       Before: Current internal registry mappings and include_aliases flag.
        After: Sorted list of strings containing canonical policy names.
     """
-    return sorted({canonical for canonical, _ in _REGISTRY.values()})
+    names = {canonical for canonical, _ in _REGISTRY.values()}
+    if include_aliases:
+        names |= {canonical for canonical, _, _ in _ALIASES.values()}
+    return sorted(names)
 
 
 def _reset_registry() -> None:
@@ -109,7 +164,7 @@ def _reset_registry() -> None:
        Resets the internal policy registry to standard baseline classical scheduling policies.
     2. How does the specific function work:
        Clears the registry dictionary and registers the default classical algorithms: FCFS,
-       SJF, SRTF, RR, and RoundRobin.
+       SJF, SRTF, RR, and RoundRobin. Also resets Category 1 SelectorPolicy aliases.
     3. Concepts used in the function:
        State re-initialization, test isolation, fixture cleanup.
     4. Places where this function is imported and used:
@@ -117,7 +172,7 @@ def _reset_registry() -> None:
        tests/test_policies.py to guarantee isolated test execution.
     5. Final output of the function, before and after:
        Before: Potentially mutated or extended registry dictionary.
-       After: Registry restored to initial baseline with default classical policies.
+       After: Registry restored to initial baseline with default classical policies and aliases.
     """
     _REGISTRY.clear()
     register_policy("FCFS", FCFSPolicy)
@@ -126,6 +181,29 @@ def _reset_registry() -> None:
     register_policy("RR", RoundRobinPolicy)
     register_policy("RoundRobin", RoundRobinPolicy)
 
+    _ALIASES.clear()
+    try:
+        from schedsim.pidsel.gbdt_ranker import GBDTRankerPolicy
+
+        register_alias("PID_GBDT", GBDTRankerPolicy)
+        register_alias("GBDT", GBDTRankerPolicy)
+    except ImportError:
+        pass
+    try:
+        from schedsim.pidsel.scorer_net import NeuralCandidatePolicy
+
+        register_alias("PID_NN", NeuralCandidatePolicy)
+        register_alias("PID_NEURAL", NeuralCandidatePolicy)
+    except ImportError:
+        pass
+
 
 # Pre-register default policies at import time
 _reset_registry()
+
+__all__ = [
+    "get_policy",
+    "list_policies",
+    "register_alias",
+    "register_policy",
+]

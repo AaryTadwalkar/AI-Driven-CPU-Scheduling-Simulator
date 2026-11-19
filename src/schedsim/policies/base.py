@@ -1,10 +1,12 @@
 """
 1. What this file does:
-   Defines the abstract base class and interface contract for all CPU scheduling policies.
+   Defines the abstract base class and interface contract for all CPU scheduling policies,
+   including lifecycle hooks for upfront and per-decision model inference latency accounting.
 2. Overall design:
    Establishes a uniform protocol for discrete unit-step scheduling algorithms. Policies must
    implement the abstract select() method to pick the next PID from the current simulation View,
-   provide a reset() hook for stateful algorithms, and implement __call__ for callable delegation.
+   provide a reset() hook for stateful algorithms, implement __call__ for callable delegation,
+   and provide on_start() / decision_cost_us() hooks for AI overhead modeling.
 3. Elements in the file:
    - Policy: Abstract base class providing the standardized interface for scheduling policies.
 4. Final output of the file:
@@ -12,6 +14,8 @@
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from typing import Any
 
 from schedsim.domain.engine import View
 
@@ -25,6 +29,8 @@ class Policy(ABC):
        - __init__: Initializes policy instance with a descriptive name.
        - select: Abstract method choosing the next process PID to run given a simulation View.
        - reset: Method resetting internal state between simulation runs (default no-op).
+       - on_start: Hook returning one-time upfront model inference latency in microseconds.
+       - decision_cost_us: Hook returning per-decision model inference latency in microseconds.
        - __call__: Magic method delegating callable invocation directly to select(view).
     3. Technologies used and why:
        - abc.ABC and @abstractmethod to enforce uniform interface implementation across policies.
@@ -88,6 +94,40 @@ class Policy(ABC):
            After: Cleared internal state ready for a fresh simulation run.
         """
         pass
+
+    def on_start(self, processes: Sequence[Any]) -> float:
+        """
+        1. The use of function:
+           Hook invoked once at workload start, returning upfront inference/feature latency in µs.
+        2. How does the specific function work:
+           Default implementation returns 0.0 µs (no overhead). Category 1 ML models override
+           this to return measured feature extraction and prediction time over the workload.
+        3. Concepts used in the function:
+           Lifecycle hook, one-time upfront model cost accounting, default no-op.
+        4. Places where this function is imported and used:
+           Invoked by Engine runner (run()) prior to the discrete simulation stepping loop.
+        5. Final output of the function, before and after:
+           Before: Sequence of workload Process instances.
+           After: Returns non-negative float inference cost in microseconds (default 0.0).
+        """
+        return 0.0
+
+    def decision_cost_us(self, view: View) -> float:
+        """
+        1. The use of function:
+           Returns the estimated or measured latency in microseconds for a non-forced decision.
+        2. How does the specific function work:
+           Default implementation returns 0.0 µs (no overhead). Learned per-decision policies
+           (e.g., Q-learning, GBDT, Neural Scorer) override this based on ready queue size.
+        3. Concepts used in the function:
+           Per-decision overhead accounting, latency model lookup, default no-op.
+        4. Places where this function is imported and used:
+           Invoked by Engine runner (run()) or test harnesses on each non-forced scheduling step.
+        5. Final output of the function, before and after:
+           Before: Observable View instance representing ready processes.
+           After: Returns non-negative float latency in microseconds (default 0.0).
+        """
+        return 0.0
 
     def __call__(self, view: View) -> str:
         """

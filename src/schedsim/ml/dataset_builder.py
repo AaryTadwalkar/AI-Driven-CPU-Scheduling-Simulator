@@ -14,6 +14,9 @@
    - build_dataset: Assembles a pandas DataFrame across a sequence of Workload entities.
    - save_dataset_to_csv: Persists the structured ML DataFrame to disk with directory creation.
    - load_dataset_from_csv: Loads and validates the ML dataset from a CSV path.
+   - check_class_distribution: Enforces the pilot-gate threshold on class balance (share < 85%).
+   - build_setting_dataset: Generates and persists a labeled dataset for a specific setting (S0/S1).
+   - load_or_generate_setting_dataset: Loads existing per-setting dataset or generates if missing.
 4. Final output of the file:
    Exports dataset building and I/O utilities for CLI commands, model training, and evaluations.
 """
@@ -27,7 +30,7 @@ import pandas as pd
 import config
 from schedsim.ml.features import FEATURE_NAMES, extract_features
 from schedsim.ml.labeling import compute_workload_label
-from schedsim.workloads.io import Workload
+from schedsim.workloads.io import Workload, load_workloads_from_csv
 from schedsim.workloads.splits import get_split_for_seed
 
 DATASET_COLUMNS: tuple[str, ...] = (
@@ -193,10 +196,143 @@ def load_dataset_from_csv(
     return df
 
 
+def check_class_distribution(
+    df: pd.DataFrame,
+    max_share: float = 0.85,
+) -> dict[str, float]:
+    """
+    1. The use of function:
+       Validates the class balance of a labeled scheduling dataset against the pilot-gate threshold.
+    2. How does the specific function work:
+       Verifies existence of 'label' column, calculates relative share proportions for each class,
+       confirms no single class has share >= max_share (default 0.85), and returns the class share
+       distribution dictionary.
+    3. Concepts used in the function:
+       Class imbalance detection, pilot study gate verification, defensive assertion.
+    4. Places where this function is imported and used:
+       Used in dataset building pipelines, Stage 12 acceptance tests, and model training routines.
+    5. Final output of the function, before and after:
+       Before: Labeled DataFrame and max_share float threshold.
+       After: Returns dictionary mapping class names to share proportions, or raises ValueError.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"df must be a pandas DataFrame, got {type(df).__name__}.")
+    if "label" not in df.columns:
+        raise ValueError("DataFrame does not contain required 'label' column.")
+    total = len(df)
+    if total == 0:
+        return {}
+
+    counts = df["label"].value_counts().to_dict()
+    shares = {str(k): float(v / total) for k, v in counts.items()}
+    for lbl, share in shares.items():
+        if share >= max_share:
+            raise ValueError(
+                f"Class distribution pilot gate failed: class '{lbl}' has share "
+                f"{share:.4f} >= {max_share:.4f}."
+            )
+    return shares
+
+
+def build_setting_dataset(
+    setting: str = "S1",
+    workloads_path: Path | str = config.DATA_DIR / "workloads.csv",
+    output_path: Optional[Path | str] = None,
+) -> pd.DataFrame:
+    """
+    1. The use of function:
+       Generates a complete labeled dataset for a specific simulation setting ('S0' or 'S1').
+    2. How does the specific function work:
+       Validates setting against config.SETTINGS, extracts corresponding cs_cost penalty,
+       loads raw workloads from CSV, runs build_dataset() to extract features and compute labels,
+       enforces pilot-gate distribution checks, persists result to disk, and returns the DataFrame.
+    3. Concepts used in the function:
+       Per-setting labeling, context-switch penalty isolation, automated dataset construction.
+    4. Places where this function is imported and used:
+       Invoked by Category 1 training workflows, CLI commands, and test suites.
+    5. Final output of the function, before and after:
+       Before: Setting identifier string and optional workload/output file paths.
+       After: Evaluated and saved pandas DataFrame conforming to DATASET_COLUMNS schema.
+    """
+    if not isinstance(setting, str):
+        raise TypeError(f"setting must be a str, got {type(setting).__name__}.")
+    setting_key = setting.upper().strip()
+    if setting_key not in config.SETTINGS:
+        valid_settings = ", ".join(config.SETTINGS.keys())
+        raise ValueError(
+            f"Unknown setting '{setting}'. Must be one of: {valid_settings}."
+        )
+
+    cs_cost = config.SETTINGS[setting_key].cs_cost
+    workloads = load_workloads_from_csv(workloads_path)
+    df = build_dataset(workloads, cs_cost=cs_cost, quantum=config.TIME_QUANTUM)
+    check_class_distribution(df, max_share=0.85)
+
+    dest_path = (
+        Path(output_path)
+        if output_path is not None
+        else config.DATA_DIR / f"scheduling_dataset_{setting_key}.csv"
+    )
+    save_dataset_to_csv(df, path=dest_path)
+    return df
+
+
+def load_or_generate_setting_dataset(
+    setting: str = "S1",
+    workloads_path: Path | str = config.DATA_DIR / "workloads.csv",
+    force_rebuild: bool = False,
+) -> pd.DataFrame:
+    """
+    1. The use of function:
+       Loads an existing per-setting dataset CSV or synthesizes it if not yet present on disk.
+    2. How does the specific function work:
+       Resolves target setting path. If file exists and force_rebuild is False, loads and validates
+       it. If setting is S1 and legacy scheduling_dataset.csv exists, copies and validates it.
+       Otherwise, generates the dataset via build_setting_dataset() and persists it.
+    3. Concepts used in the function:
+       Idempotent data caching, fallback dataset generation, automated validation.
+    4. Places where this function is imported and used:
+       Invoked by train_category1_models() in train_forest.py and Stage 12 tests.
+    5. Final output of the function, before and after:
+       Before: Setting identifier string and generation flags.
+       After: Validated pandas DataFrame loaded from cache or freshly generated.
+    """
+    if not isinstance(setting, str):
+        raise TypeError(f"setting must be a str, got {type(setting).__name__}.")
+    setting_key = setting.upper().strip()
+    if setting_key not in config.SETTINGS:
+        valid_settings = ", ".join(config.SETTINGS.keys())
+        raise ValueError(
+            f"Unknown setting '{setting}'. Must be one of: {valid_settings}."
+        )
+
+    target_path = config.DATA_DIR / f"scheduling_dataset_{setting_key}.csv"
+    if not force_rebuild and target_path.exists():
+        df = load_dataset_from_csv(target_path)
+        check_class_distribution(df, max_share=0.85)
+        return df
+
+    legacy_s1_path = config.DATA_DIR / "scheduling_dataset.csv"
+    if not force_rebuild and setting_key == "S1" and legacy_s1_path.exists():
+        df = load_dataset_from_csv(legacy_s1_path)
+        check_class_distribution(df, max_share=0.85)
+        save_dataset_to_csv(df, target_path)
+        return df
+
+    return build_setting_dataset(
+        setting=setting_key,
+        workloads_path=workloads_path,
+        output_path=target_path,
+    )
+
+
 __all__ = [
     "DATASET_COLUMNS",
     "build_dataset",
     "build_dataset_row",
+    "build_setting_dataset",
+    "check_class_distribution",
     "load_dataset_from_csv",
+    "load_or_generate_setting_dataset",
     "save_dataset_to_csv",
 ]
